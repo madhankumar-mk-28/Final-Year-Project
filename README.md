@@ -1,6 +1,6 @@
 # ML-Based Resume Screening System
 
-An AI-powered Resume Screening System that automatically ranks job candidates by analyzing resumes against a job description using transformer-based semantic similarity models.
+A Resume Screening System that automatically ranks job candidates by analyzing resumes against a job description using transformer-based semantic similarity models.
 
 Unlike traditional ATS systems that rely only on keyword matching, this system performs true semantic understanding of resumes using modern embedding models.
 
