@@ -102,7 +102,7 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    """Load config.json from disk, or return defaults if the file is missing or malformed."""
+    """Load config.json from disk, or return defaults if missing or malformed."""
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE) as f:
@@ -134,10 +134,7 @@ def _file_sha256(file_storage) -> str:
 
 
 def _existing_hashes() -> dict:
-    """
-    Build a map of { sha256_hex: filename } for all PDFs already in uploads/.
-    Used for content-based deduplication on each new upload.
-    """
+    """Build a map of { sha256_hex: filename } for all PDFs already in uploads/."""
     hashes = {}
     for pdf in UPLOAD_FOLDER.glob("*.pdf"):
         try:
@@ -149,10 +146,7 @@ def _existing_hashes() -> dict:
 
 
 def serialize_results(results: list) -> list:
-    """
-    Convert the scoring engine output into JSON-safe dicts
-    that match the shape the React frontend expects.
-    """
+    """Convert scoring engine output into JSON-safe dicts matching the React frontend shape."""
     serialized = []
     rank = 1
     for r in results:
@@ -188,15 +182,159 @@ def _write_audit(entry: dict):
     except OSError as e:
         logger.warning("[Audit] Could not write audit log: %s", e)
 
+def _merge_candidate_profiles(profile_a: dict, profile_b: dict) -> dict:
+    """Merge two profiles for the same person, keeping the most detailed value for each field."""
+    merged = {}
+
+    # Name: pick the longer (more complete) variant
+    name_a = (profile_a.get("name") or "").strip()
+    name_b = (profile_b.get("name") or "").strip()
+    merged["name"] = name_a if len(name_a) >= len(name_b) else name_b
+
+    # Email / phone: prefer non-empty, then longer
+    for key in ("email", "phone"):
+        val_a = (profile_a.get(key) or "").strip()
+        val_b = (profile_b.get(key) or "").strip()
+        merged[key] = val_a if len(val_a) >= len(val_b) else val_b
+
+    # Skills: union
+    skills_a = set(profile_a.get("skills") or [])
+    skills_b = set(profile_b.get("skills") or [])
+    merged["skills"] = sorted(skills_a | skills_b)
+
+    # Experience: take the maximum
+    merged["experience_years"] = max(
+        profile_a.get("experience_years", 0.0),
+        profile_b.get("experience_years", 0.0),
+    )
+
+    # Education: union of unique entries
+    edu_a = profile_a.get("education") or []
+    edu_b = profile_b.get("education") or []
+    seen = set()
+    merged_edu = []
+    for entry in edu_a + edu_b:
+        key = entry.strip().lower()
+        if key not in seen:
+            seen.add(key)
+            merged_edu.append(entry)
+    merged["education"] = merged_edu
+
+    return merged
+
+
+def merge_duplicate_candidates(extracted: dict) -> dict:
+    """Truth Engine: merge multiple PDFs for the same person (matched by email or phone)."""
+    email_map = {}
+    phone_map = {}
+    groups = []
+    assigned = set()
+
+    items = list(extracted.items())
+
+    # Build groups by matching email or phone
+    for i, (fname_a, info_a) in enumerate(items):
+        if fname_a in assigned:
+            continue
+        group = [(fname_a, info_a)]
+        assigned.add(fname_a)
+        email_a = (info_a.get("email") or "").strip().lower()
+        phone_a = (info_a.get("phone") or "").strip()
+
+        for j in range(i + 1, len(items)):
+            fname_b, info_b = items[j]
+            if fname_b in assigned:
+                continue
+            email_b = (info_b.get("email") or "").strip().lower()
+            phone_b = (info_b.get("phone") or "").strip()
+
+            match = False
+            if email_a and email_b and email_a == email_b:
+                match = True
+            elif phone_a and phone_b and phone_a == phone_b:
+                match = True
+
+            if match:
+                group.append((fname_b, info_b))
+                assigned.add(fname_b)
+
+        groups.append(group)
+
+    # Merge each group
+    merged = {}
+    for group in groups:
+        if len(group) == 1:
+            merged[group[0][0]] = group[0][1]
+        else:
+            # Progressive merge: fold each profile into the accumulator
+            acc = group[0][1]
+            filenames = [group[0][0]]
+            for fname, info in group[1:]:
+                acc = _merge_candidate_profiles(acc, info)
+                filenames.append(fname)
+            primary_key = filenames[0]
+            acc["_merged_from"] = filenames
+            merged[primary_key] = acc
+            logger.info(
+                "[TruthEngine] Merged %d profiles → %s (files: %s)",
+                len(filenames), acc.get("name", "?"), filenames,
+            )
+
+    return merged
+
+
+def compare_candidates(profile_a: dict, profile_b: dict) -> dict:
+    """Compute the delta (differences) between two candidate profiles."""
+    delta = {}
+
+    # Name
+    name_a = (profile_a.get("name") or "").strip()
+    name_b = (profile_b.get("name") or "").strip()
+    if name_a != name_b:
+        delta["name"] = {"before": name_a, "after": name_b}
+
+    # Email
+    email_a = (profile_a.get("email") or "").strip()
+    email_b = (profile_b.get("email") or "").strip()
+    if email_a != email_b:
+        delta["email"] = {"before": email_a, "after": email_b}
+
+    # Phone
+    phone_a = (profile_a.get("phone") or "").strip()
+    phone_b = (profile_b.get("phone") or "").strip()
+    if phone_a != phone_b:
+        delta["phone"] = {"before": phone_a, "after": phone_b}
+
+    # Experience
+    exp_a = profile_a.get("experience_years", 0.0)
+    exp_b = profile_b.get("experience_years", 0.0)
+    if exp_a != exp_b:
+        delta["experience_years"] = {"before": exp_a, "after": exp_b}
+
+    # Skills
+    skills_a = set(profile_a.get("skills") or [])
+    skills_b = set(profile_b.get("skills") or [])
+    added   = sorted(skills_b - skills_a)
+    removed = sorted(skills_a - skills_b)
+    if added or removed:
+        delta["skills"] = {"added": added, "removed": removed}
+
+    # Education
+    edu_a = set(e.strip().lower() for e in (profile_a.get("education") or []))
+    edu_b = set(e.strip().lower() for e in (profile_b.get("education") or []))
+    edu_added   = sorted(edu_b - edu_a)
+    edu_removed = sorted(edu_a - edu_b)
+    if edu_added or edu_removed:
+        delta["education"] = {"added": edu_added, "removed": edu_removed}
+
+    return delta
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    """
-    Lightweight health-check endpoint.
-    Returns server status, active model, and pipeline readiness.
-    """
+    """Lightweight health-check endpoint returning server status and pipeline readiness."""
     pdf_count = len(list(UPLOAD_FOLDER.glob("*.pdf")))
     return jsonify({
         "status":          "ok",
@@ -209,12 +347,7 @@ def health():
 
 @app.route("/api/upload-resumes", methods=["POST"])
 def upload_resumes():
-    """
-    Accept one or more PDF files via multipart form-data.
-    Enforces a 10 MB per-file limit and skips exact duplicate files
-    (content-hash based deduplication).
-    Saves accepted files to uploads/ and returns a detailed status.
-    """
+    """Accept PDF files via multipart form-data, deduplicate by content hash, save to uploads/."""
     if "files" not in request.files:
         return jsonify({"error": "No files provided"}), 400
 
@@ -281,22 +414,7 @@ def upload_resumes():
 
 @app.route("/api/screen", methods=["POST"])
 def screen():
-    """
-    Run the full 4-step ML pipeline on all uploaded PDFs.
-
-    Request JSON:
-    {
-        "job_description": "...",
-        "required_skills": ["python", "ml", ...],
-        "model": "mpnet" | "mxbai" | "arctic",
-        "config": {
-            "min_experience_years": 0,
-            "skill_weight": 0.55,
-            "semantic_weight": 0.45,
-            "top_n": 20
-        }
-    }
-    """
+    """Run the full 4-step ML pipeline on all uploaded PDFs and return ranked results."""
     global _active_model_key
 
     body = request.get_json(silent=True) or {}
@@ -342,6 +460,10 @@ def screen():
             filename: extract_all(text, filename)
             for filename, text in resume_texts.items()
         }
+
+        # Step 2b — Truth Engine: merge duplicate candidates (same email/phone)
+        logger.info("[Pipeline] Step 2b — Running Truth Engine (duplicate merge)...")
+        extracted = merge_duplicate_candidates(extracted)
 
         # Step 3 — Compute document-level semantic similarity
         # Use ensemble (all 3 models) when model_key == "ensemble", otherwise
@@ -478,10 +600,7 @@ def get_model():
 
 @app.route("/api/model", methods=["POST"])
 def set_model():
-    """
-    Switch the active embedding model for this session.
-    Body: { "model": "mpnet" | "mxbai" | "arctic" | "ensemble" }
-    """
+    """Switch the active embedding model for this session."""
     global _active_model_key
     body      = request.get_json(silent=True) or {}
     model_key = body.get("model", "")
@@ -514,11 +633,7 @@ def clear_uploads():
 
 @app.route("/api/export", methods=["GET"])
 def export_results():
-    """
-    Download the latest screening results as a CSV file.
-    Only shortlisted (eligible) candidates are included.
-    Returns 404 if no results have been generated yet.
-    """
+    """Download the latest screening results (shortlisted candidates only) as a CSV file."""
     if not RESULTS_FILE.exists():
         return jsonify({"error": "No results available. Run screening first."}), 404
 
@@ -563,10 +678,7 @@ def export_results():
 
 @app.route("/api/audit", methods=["GET"])
 def get_audit():
-    """
-    Return the last N screening audit log entries.
-    Query param: ?limit=20 (default 20, max 100)
-    """
+    """Return the last N screening audit log entries (default 20, max 100)."""
     try:
         limit = min(int(request.args.get("limit", 20)), 100)
     except (ValueError, TypeError):
@@ -592,14 +704,71 @@ def get_audit():
         return jsonify({"error": f"Could not read audit log: {e}"}), 500
 
 
+@app.route("/api/compare", methods=["POST"])
+def compare():
+    """Compare two candidates by their IDs and return a detailed delta."""
+    if not RESULTS_FILE.exists():
+        return jsonify({"error": "No results found. Run screening first."}), 404
+
+    body = request.get_json(silent=True) or {}
+    id_a = body.get("id_a")
+    id_b = body.get("id_b")
+    if not id_a or not id_b:
+        return jsonify({"error": "Provide id_a and id_b in the request body."}), 400
+
+    try:
+        with open(RESULTS_FILE) as f:
+            results = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"error": f"Could not read results: {e}"}), 500
+
+    cand_a = next((r for r in results if r["id"] == id_a), None)
+    cand_b = next((r for r in results if r["id"] == id_b), None)
+    if not cand_a:
+        return jsonify({"error": f"Candidate {id_a} not found."}), 404
+    if not cand_b:
+        return jsonify({"error": f"Candidate {id_b} not found."}), 404
+
+    # Build profile dicts from serialized results
+    profile_a = {
+        "name": cand_a.get("name", ""),
+        "email": cand_a.get("email", ""),
+        "phone": cand_a.get("phone", ""),
+        "skills": cand_a.get("skills", []),
+        "experience_years": cand_a.get("experience", 0.0),
+        "education": cand_a.get("education", []),
+    }
+    profile_b = {
+        "name": cand_b.get("name", ""),
+        "email": cand_b.get("email", ""),
+        "phone": cand_b.get("phone", ""),
+        "skills": cand_b.get("skills", []),
+        "experience_years": cand_b.get("experience", 0.0),
+        "education": cand_b.get("education", []),
+    }
+
+    delta = compare_candidates(profile_a, profile_b)
+
+    # score_delta: positive means candidate A scores higher than candidate B
+    score_delta = {
+        "skillScore":    round(cand_a.get("skillScore", 0) - cand_b.get("skillScore", 0), 4),
+        "semanticScore": round(cand_a.get("semanticScore", 0) - cand_b.get("semanticScore", 0), 4),
+        "finalScore":    round(cand_a.get("finalScore", 0) - cand_b.get("finalScore", 0), 4),
+    }
+
+    return jsonify({
+        "candidate_a": cand_a,
+        "candidate_b": cand_b,
+        "profile_delta": delta,
+        "score_delta": score_delta,
+    }), 200
+
+
 # ── Serve React build (production) ────────────────────────────────────────────
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_react(path):
-    """
-    Serves the built React app in production mode.
-    In development, React runs on port 3000 — this route won't be hit.
-    """
+    """Serves the built React app in production; in dev, React runs on port 3000."""
     build_dir = Path("frontend/build")
     if build_dir.exists():
         if path and (build_dir / path).exists():

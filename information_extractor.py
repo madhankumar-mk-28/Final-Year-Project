@@ -106,7 +106,7 @@ DEGREE_PATTERN = re.compile(
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def extract_all(text: str, filename: str = "") -> dict:
-    """Extract all fields. Always uses filename for name if provided."""
+    """Extract all structured fields from resume text; uses filename for name if provided."""
     result = {
         "name":             name_from_filename(filename) if filename else "Unknown",
         "email":            extract_email(text),
@@ -124,21 +124,7 @@ def extract_all(text: str, filename: str = "") -> dict:
 
 
 def name_from_filename(filename: str) -> str:
-    """
-    Derive a clean person name from the PDF filename.
-    
-    Examples:
-        Abhiram_A.pdf                    → Abhiram A
-        Shanjiv New Resume Latest.pdf    → Shanjiv
-        deepak_kumaravel_Resume.pdf      → Deepak Kumaravel
-        Salman_Mubarak_Ali_Resume_Deloitte.pdf → Salman Mubarak Ali
-        SudharsanCN_Resume.pdf.pdf       → Sudharsan CN
-        HAMDAN RESUME-4.pdf              → Hamdan
-        saad.resume.pdf                  → Saad
-        MyCV.pdf                         → MyCV
-        resume final.pdf                 → (uses fallback = filename stem)
-        RenderCV_EngineeringResumes_Theme (1).pdf → (fallback)
-    """
+    """Derive a clean person name from the PDF filename (strips noise words, extensions, numbers)."""
     # Strip all extensions (.pdf.pdf too)
     base = filename
     while True:
@@ -193,13 +179,7 @@ def extract_email(text: str) -> str:
 # ── Phone ─────────────────────────────────────────────────────────────────────
 
 def extract_phone(text: str) -> str:
-    """
-    Extracts Indian mobile numbers and international numbers.
-    Handles formats:
-      +91 9876543210   |  +91-987-654-3210
-      9876543210       |  98765 43210
-      +1 (555) 123-4567
-    """
+    """Extract Indian mobile numbers and international numbers from resume text."""
     patterns = [
         r"\+91[\s\-]?[6-9]\d{9}",              # +91 Indian
         r"\+91[\s\-]?\d{3}[\s\-]?\d{3}[\s\-]?\d{4}",  # +91 with separators
@@ -220,10 +200,7 @@ def extract_phone(text: str) -> str:
 # ── Skills (improved: multi-word first, then single-word) ────────────────────
 
 def extract_skills(text: str) -> list:
-    """
-    Matches skills from SKILLS_DB against resume text.
-    Multi-word skills checked first to avoid partial matches.
-    """
+    """Match skills from SKILLS_DB against resume text (multi-word first, then single-word)."""
     text_lower = text.lower()
     found = set()
 

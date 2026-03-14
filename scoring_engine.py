@@ -139,12 +139,7 @@ def _is_skill_match(req_lower: str, candidate_lower: set) -> bool:
 
 
 def _skill_score(candidate_skills: list, required_skills: list, semantic_matches: set | None = None) -> tuple:
-    """
-    Match required skills against candidate skills using aliases.
-    Optionally also accepts `semantic_matches` — a set of required skill strings
-    that were already confirmed as matched via embedding similarity.
-    Returns (score 0-1, matched list, missing list).
-    """
+    """Match required skills against candidate skills using aliases + optional semantic matches."""
     if not required_skills:
         return 1.0, [], []
 
@@ -173,7 +168,7 @@ def _skill_score(candidate_skills: list, required_skills: list, semantic_matches
 # ── Eligibility filter ────────────────────────────────────────────────────────
 
 def is_eligible(info: dict, config: ScoringConfig) -> tuple:
-    """Hard filter. Returns (eligible: bool, reason: str)."""
+    """Hard eligibility filter — returns (eligible: bool, reason: str)."""
 
     # Reject if neither email nor phone is present
     email = (info.get("email") or "").strip()
@@ -196,18 +191,7 @@ def is_eligible(info: dict, config: ScoringConfig) -> tuple:
 # ── Main scoring ──────────────────────────────────────────────────────────────
 
 def score_candidates(candidates: list, required_skills: list, config: ScoringConfig) -> list:
-    """
-    Score and rank all candidates.
-
-    Each candidate dict must have:
-      { "filename", "info": {name, skills, experience_years, ...}, "semantic_score" }
-
-    Optional per-candidate key:
-      "semantic_skill_matches": set of required skill strings that were matched
-                                via embedding similarity (from semantic_matcher).
-
-    Returns sorted list with scoring details.
-    """
+    """Score and rank all candidates; returns sorted list with scoring details."""
     logger.info("[scoring_engine] Scoring %d candidates | weights: skill=%.2f semantic=%.2f exp=%.2f",
                 len(candidates), config.skill_weight, config.semantic_weight, config.exp_weight)
 

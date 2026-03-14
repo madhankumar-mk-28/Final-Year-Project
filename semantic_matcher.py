@@ -34,14 +34,7 @@ _model_cache: dict = {}
 
 
 def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
-    """
-    Load a SentenceTransformer from local cache, or load it the first time.
-
-    Device priority:
-      1. Apple MPS (Mac GPU) — best for local Mac development
-      2. CUDA  (NVIDIA GPU)  — if on Linux/Windows with GPU
-      3. CPU                 — universal fallback
-    """
+    """Load a SentenceTransformer from cache, or download/load it the first time."""
     if model_name not in _model_cache:
         if torch.backends.mps.is_available():
             device = "mps"
@@ -51,7 +44,14 @@ def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
             device = "cpu"
 
         logger.info("[SemanticMatcher] Loading model '%s' on %s ...", model_name, device)
-        _model_cache[model_name] = SentenceTransformer(model_name, device=device)
+        try:
+            _model_cache[model_name] = SentenceTransformer(model_name, device=device)
+        except Exception as exc:
+            logger.error("[SemanticMatcher] Failed to load model '%s': %s", model_name, exc)
+            raise RuntimeError(
+                f"Could not load embedding model '{model_name}'. "
+                f"Check your internet connection or model name. Detail: {exc}"
+            ) from exc
         logger.info("[SemanticMatcher] Model '%s' ready.", model_name)
 
     return _model_cache[model_name]
@@ -60,19 +60,14 @@ def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
 # ── Text preprocessing helpers ────────────────────────────────────────────────
 
 def _preprocess(text: str) -> str:
-    """Clean text — collapse whitespace, strip non-ASCII noise."""
+    """Clean text: collapse whitespace and strip non-ASCII noise."""
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"[^\x00-\x7F]+", " ", text)
     return text.strip()
 
 
 def _extract_key_sections(text: str) -> str:
-    """
-    Extract the most job-relevant sections from a resume.
-    (Skills, Experience, Projects, Summary, Certifications)
-    These carry more signal than contact info or headers.
-    Falls back to full text if no known sections are found.
-    """
+    """Extract the most job-relevant sections (Skills, Experience, Projects) from a resume."""
     header_pattern = re.compile(
         r"(skills|technical skills|experience|work experience|projects?|"
         r"summary|objective|internship|achievements?|certifications?)",
@@ -93,11 +88,7 @@ def _extract_key_sections(text: str) -> str:
 
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, stride: int = CHUNK_STRIDE) -> list:
-    """
-    Split text into overlapping word-level chunks.
-    Most embedding models have a 512-token limit.
-    Chunking + pooling avoids information loss on long resumes.
-    """
+    """Split text into overlapping word-level chunks for long documents."""
     words  = text.split()
     chunks = []
 
@@ -114,35 +105,48 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, stride: int = CHUNK_STR
 # ── Embedding ─────────────────────────────────────────────────────────────────
 
 def embed_text(text: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
-    """
-    Embed a long document using max-pooling over chunks.
-    Max-pooling keeps the strongest signal from each part of the document.
-    """
-    model      = _get_model(model_name)
-    text       = _preprocess(text)
-    chunks     = _chunk_text(text)
-    embeddings = model.encode(
-        chunks,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-        normalize_embeddings=True,   # unit-length vectors — needed for cosine similarity
-    )
-    return np.max(embeddings, axis=0)
+    """Embed a long document using hybrid Mean-Max pooling over chunks."""
+    model  = _get_model(model_name)
+    text   = _preprocess(text)
+    chunks = _chunk_text(text)
+    try:
+        embeddings = model.encode(
+            chunks,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+    except Exception as exc:
+        logger.error("[SemanticMatcher] Encoding failed: %s", exc)
+        raise RuntimeError(f"Embedding encoding error: {exc}") from exc
+
+    # Hybrid Mean-Max pooling: 50% mean + 50% max
+    # Mean captures the overall theme; max retains the strongest signal per dimension.
+    mean_pool = np.mean(embeddings, axis=0)
+    max_pool  = np.max(embeddings, axis=0)
+    combined  = 0.5 * mean_pool + 0.5 * max_pool
+
+    # Re-normalize to unit length for cosine similarity
+    norm = np.linalg.norm(combined)
+    if norm > 0:
+        combined = combined / norm
+    return combined
 
 
 def embed_job_description(jd: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
-    """
-    Embed a job description string.
-    JDs are usually short enough to fit in one pass (no chunking needed).
-    """
+    """Embed a job description string (short enough for a single-pass encode)."""
     model = _get_model(model_name)
     jd    = _preprocess(jd)
-    return model.encode(
-        [jd],
-        convert_to_numpy=True,
-        show_progress_bar=False,
-        normalize_embeddings=True,
-    )[0]
+    try:
+        return model.encode(
+            [jd],
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )[0]
+    except Exception as exc:
+        logger.error("[SemanticMatcher] JD encoding failed: %s", exc)
+        raise RuntimeError(f"Job description encoding error: {exc}") from exc
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -161,21 +165,7 @@ def rank_resumes_by_similarity(
     job_description: str,
     model_name: str = DEFAULT_MODEL,
 ) -> list:
-    """
-    Rank resumes by semantic similarity to the job description.
-
-    Two-pass scoring:
-      • Full resume vs JD  — 40% weight (broad context)
-      • Key sections vs JD — 60% weight (skills / experience are most relevant)
-
-    Args:
-        resume_texts:    dict of { filename: extracted_text }
-        job_description: Job description string
-        model_name:      One of MPNET_MODEL, MXBAI_MODEL, ARCTIC_MODEL
-
-    Returns:
-        List of { filename, similarity_score } sorted by score descending.
-    """
+    """Rank resumes by two-pass semantic similarity (40% full text + 60% key sections) to the JD."""
     logger.info(
         "[SemanticMatcher] Ranking %d resumes using '%s'",
         len(resume_texts), model_name,
@@ -221,22 +211,7 @@ def rank_resumes_ensemble(
     job_description: str,
     weights: dict | None = None,
 ) -> list:
-    """
-    Rank resumes using an ensemble of all three embedding models.
-
-    Each model independently scores every resume.  The final similarity score
-    is the weighted average across models, producing a more robust signal than
-    any single model alone.
-
-    Args:
-        resume_texts:    dict of { filename: extracted_text }
-        job_description: Job description string
-        weights:         Optional dict { model_id: float }.
-                         Defaults to ENSEMBLE_WEIGHTS.
-
-    Returns:
-        List of { filename, similarity_score } sorted by score descending.
-    """
+    """Rank resumes using a weighted ensemble of all three embedding models."""
     if weights is None:
         weights = ENSEMBLE_WEIGHTS
 
@@ -278,30 +253,7 @@ def compute_skill_semantic_matches(
     model_name: str = DEFAULT_MODEL,
     threshold: float = SKILL_SEMANTIC_THRESHOLD,
 ) -> set:
-    """
-    Use embedding similarity to find required skills that semantically match
-    at least one of the candidate's skills.
-
-    This complements alias-based matching by capturing near-synonyms and
-    related concepts that are not listed in the static SKILL_ALIASES table.
-    For example:
-        • "verbal communication" → semantically matches "communication"
-        • "data analytics"       → semantically matches "analytics" / "business intelligence"
-        • "problem solving"      → semantically matches "critical thinking"
-        • "mysql"                → semantically matches "sql"
-
-    Note: The threshold (default 0.60) is intentionally conservative to avoid
-    matching conceptually distinct skills.  Increase it to tighten matching.
-
-    Args:
-        candidate_skills: list of skill strings extracted from the resume
-        required_skills:  list of skill strings the job requires
-        model_name:       embedding model to use for comparison
-        threshold:        cosine similarity cut-off (default 0.60)
-
-    Returns:
-        Set of required skill strings that have a semantic match.
-    """
+    """Use embedding similarity to find required skills that semantically match at least one candidate skill."""
     if not candidate_skills or not required_skills:
         return set()
 
