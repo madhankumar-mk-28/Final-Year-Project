@@ -67,7 +67,8 @@ AUDIT_FILE    = Path("audit.jsonl")
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 # ── Upload limits ─────────────────────────────────────────────────────────────
-MAX_FILE_BYTES = 10 * 1024 * 1024   # 10 MB per file
+MAX_FILE_BYTES          = 10 * 1024 * 1024   # 10 MB per file
+MAX_AUDIT_JD_CHARS      = 120                # truncate long job descriptions in the audit log
 
 # ── Supported embedding models ────────────────────────────────────────────────
 # Maps short frontend key → full HuggingFace model ID (used by sentence-transformers)
@@ -378,7 +379,7 @@ def screen():
             "shortlisted":      shortlisted,
             "rejected":         len(serialized) - shortlisted,
             "elapsed_seconds":  round(elapsed_s, 2),
-            "job_description":  (job_description or "")[:120],
+            "job_description":  (job_description or "")[:MAX_AUDIT_JD_CHARS],
             "required_skills":  required_skills,
             "skill_weight":     round(scoring_cfg.skill_weight, 2),
             "semantic_weight":  round(scoring_cfg.semantic_weight, 2),
@@ -526,7 +527,7 @@ def export_results():
         })
 
     csv_bytes = output.getvalue().encode("utf-8")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return Response(
         csv_bytes,
         mimetype="text/csv",
