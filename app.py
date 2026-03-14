@@ -36,6 +36,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+import numpy as np
 
 # ── ML pipeline modules ───────────────────────────────────────────────────────
 from resume_parser         import load_resumes_from_folder
@@ -45,8 +46,10 @@ from semantic_matcher      import (
     rank_resumes_ensemble,
     compute_skill_semantic_matches,
     MPNET_MODEL, MXBAI_MODEL, ARCTIC_MODEL,
+    ENSEMBLE_WEIGHTS,
 )
 from scoring_engine        import ScoringConfig, score_candidates
+from metrics_store         import record_run
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -468,9 +471,27 @@ def screen():
         # Step 3 — Compute document-level semantic similarity
         # Use ensemble (all 3 models) when model_key == "ensemble", otherwise
         # fall back to the single selected model.
+        # We run each model individually (instead of rank_resumes_ensemble) so
+        # that we can capture per_model_similarities for metrics recording and
+        # Spearman rank-correlation analysis.
+        per_model_similarities: dict = {}
         if model_key == "ensemble":
             logger.info("[Pipeline] Step 3 — Ensemble semantic similarity (all 3 models)...")
-            similarity_results = rank_resumes_ensemble(resume_texts, job_description)
+            for _m in ENSEMBLE_WEIGHTS:
+                per_model_similarities[_m] = rank_resumes_by_similarity(
+                    resume_texts, job_description, model_name=_m
+                )
+            # Weighted average (mirrors rank_resumes_ensemble logic)
+            total_weight = sum(ENSEMBLE_WEIGHTS.values())
+            accumulated: dict = {fname: 0.0 for fname in resume_texts}
+            for _m, _w in ENSEMBLE_WEIGHTS.items():
+                for r in per_model_similarities[_m]:
+                    accumulated[r["filename"]] += _w * r["similarity_score"]
+            similarity_results = [
+                {"filename": f, "similarity_score": round(float(np.clip(s / total_weight, 0.0, 1.0)), 4)}
+                for f, s in accumulated.items()
+            ]
+            similarity_results.sort(key=lambda x: x["similarity_score"], reverse=True)
         else:
             logger.info("[Pipeline] Step 3 — Computing semantic similarity (%s)...", model_name)
             similarity_results = rank_resumes_by_similarity(
@@ -517,6 +538,19 @@ def screen():
             "[Pipeline] Done — %d ranked | %d shortlisted | model: %s | %.1fs",
             len(serialized), shortlisted, model_key, elapsed_s,
         )
+
+        # ── Metrics store — record cosine similarities, stats, and accuracy ──
+        try:
+            record_run(
+                run_id=started_at.isoformat(),
+                model_key=model_key,
+                job_description=job_description or "",
+                similarity_results=similarity_results,
+                per_model_similarities=per_model_similarities or None,
+                final_scores=serialized,
+            )
+        except Exception as _me:
+            logger.warning("[MetricsStore] Could not record run metrics: %s", _me)
 
         # ── Audit log ────────────────────────────────────────────────────────
         _write_audit({

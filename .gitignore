@@ -3,6 +3,10 @@ build/
 Resumes/
 results.csv
 last_results.json
+audit.jsonl
+metrics_log.jsonl
+embeddings_store.json
+metrics_export.csv
 .DS_Store
 __pycache__/
 *.pyc
