@@ -1,7 +1,7 @@
 /**
  * api.js
  * -------
- * All fetch calls to the Flask backend (http://localhost:5000).
+ * All fetch calls to the Flask backend (http://localhost:5001).
  * Import these helpers from any React component.
  *
  * Endpoints covered:
@@ -16,7 +16,7 @@
  *   clearUploads()                   → POST /api/clear
  */
 
-const BASE = "http://localhost:5000";
+const BASE = "http://localhost:5001";
 
 // ─── Generic fetch wrapper ────────────────────────────────────────────────────
 
@@ -121,7 +121,7 @@ export async function getActiveModel() {
 
 /**
  * Switch the active model.
- * @param {"mpnet" | "minilm"} modelKey
+ * @param {"mpnet" | "mxbai" | "arctic"} modelKey
  * @returns {{ message, active, full_name }}
  */
 export async function switchModel(modelKey) {

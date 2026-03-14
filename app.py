@@ -381,7 +381,7 @@ def serve_react(path):
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 5001))
 
     print("=" * 58)
     print("  ML-Based Resume Screening System — Flask API")
