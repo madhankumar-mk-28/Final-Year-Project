@@ -1,0 +1,6 @@
+node_modules/
+build/
+Resumes/
+results.csv
+last_results.json
+.DS_Store
