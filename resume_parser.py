@@ -57,19 +57,22 @@ def _extract_pymupdf(pdf_path: str) -> str:
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """
-    Extract and clean all text from a PDF file.
-
-    Tries pdfplumber first. If the result is empty or very short,
-    falls back to PyMuPDF for better coverage on difficult PDFs.
-    """
+    """Extract and clean all text from a PDF, falling back to PyMuPDF if pdfplumber fails."""
     fname = os.path.basename(pdf_path)
+
+    if not os.path.isfile(pdf_path):
+        logger.error("[resume_parser] File not found: %s", pdf_path)
+        return ""
+
     text = ""
 
     # ── Primary: pdfplumber ───────────────────────────────────────────────────
     try:
         text = _extract_pdfplumber(pdf_path)
         logger.info("[resume_parser] pdfplumber → %s (%d chars)", fname, len(text))
+    except PermissionError as e:
+        logger.error("[resume_parser] Permission denied reading %s: %s", fname, e)
+        return ""
     except Exception as e:
         logger.warning("[resume_parser] pdfplumber failed for %s: %s", fname, e)
 
@@ -91,10 +94,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 
 
 def load_resumes_from_folder(folder_path: str) -> dict:
-    """
-    Load all PDFs from a folder.
-    Returns: { filename: text_content }
-    """
+    """Load all PDFs from a folder and return { filename: text_content }."""
     if not os.path.isdir(folder_path):
         raise NotADirectoryError(f"Folder not found: {folder_path}")
 
