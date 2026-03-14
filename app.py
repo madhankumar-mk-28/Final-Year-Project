@@ -42,6 +42,8 @@ from resume_parser         import load_resumes_from_folder
 from information_extractor import extract_all
 from semantic_matcher      import (
     rank_resumes_by_similarity,
+    rank_resumes_ensemble,
+    compute_skill_semantic_matches,
     MPNET_MODEL, MXBAI_MODEL, ARCTIC_MODEL,
 )
 from scoring_engine        import ScoringConfig, score_candidates
@@ -72,20 +74,22 @@ MAX_AUDIT_JD_CHARS      = 120                # truncate long job descriptions in
 
 # ── Supported embedding models ────────────────────────────────────────────────
 # Maps short frontend key → full HuggingFace model ID (used by sentence-transformers)
+# "ensemble" is a special key that runs all three models and averages the results.
 VALID_MODELS = {
-    "mpnet":  MPNET_MODEL,    # multi-qa-mpnet-base-dot-v1
-    "mxbai":  MXBAI_MODEL,    # mixedbread-ai/mxbai-embed-large-v1
-    "arctic": ARCTIC_MODEL,   # Snowflake/snowflake-arctic-embed-m-v1.5
+    "mpnet":    MPNET_MODEL,    # multi-qa-mpnet-base-dot-v1
+    "mxbai":    MXBAI_MODEL,    # mixedbread-ai/mxbai-embed-large-v1
+    "arctic":   ARCTIC_MODEL,   # Snowflake/snowflake-arctic-embed-m-v1.5
+    "ensemble": "ensemble",     # weighted average of all three models
 }
 
 # Active model key for the current session
-_active_model_key = "mpnet"
+_active_model_key = "ensemble"
 
 # ── Default config ────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
     "job_description": "",
     "required_skills": [],
-    "model": "mpnet",
+    "model": "ensemble",
     "scoring": {
         "skill_weight":         0.55,
         "semantic_weight":      0.45,
@@ -339,20 +343,41 @@ def screen():
             for filename, text in resume_texts.items()
         }
 
-        # Step 3 — Compute semantic similarity
-        logger.info("[Pipeline] Step 3 — Computing semantic similarity (%s)...", model_name)
-        similarity_results = rank_resumes_by_similarity(
-            resume_texts, job_description, model_name=model_name
-        )
+        # Step 3 — Compute document-level semantic similarity
+        # Use ensemble (all 3 models) when model_key == "ensemble", otherwise
+        # fall back to the single selected model.
+        if model_key == "ensemble":
+            logger.info("[Pipeline] Step 3 — Ensemble semantic similarity (all 3 models)...")
+            similarity_results = rank_resumes_ensemble(resume_texts, job_description)
+        else:
+            logger.info("[Pipeline] Step 3 — Computing semantic similarity (%s)...", model_name)
+            similarity_results = rank_resumes_by_similarity(
+                resume_texts, job_description, model_name=model_name
+            )
         similarity_map = {r["filename"]: r["similarity_score"] for r in similarity_results}
+
+        # Step 3b — Skill-level semantic matching
+        # Use embeddings to find required skills that semantically match
+        # each candidate's extracted skills (catches near-synonyms not in the
+        # static alias table, e.g. "collaboration" → "adaptability").
+        skill_model = MPNET_MODEL if model_key == "ensemble" else model_name
+        logger.info("[Pipeline] Step 3b — Semantic skill matching (%s)...", skill_model)
+        semantic_skill_map: dict = {}
+        for fname, info in extracted.items():
+            semantic_skill_map[fname] = compute_skill_semantic_matches(
+                info.get("skills", []),
+                required_skills,
+                model_name=skill_model,
+            )
 
         # Step 4 — Score and rank
         logger.info("[Pipeline] Step 4 — Scoring and ranking...")
         candidates = [
             {
-                "filename":       fname,
-                "info":           info,
-                "semantic_score": similarity_map.get(fname, 0.0),
+                "filename":              fname,
+                "info":                  info,
+                "semantic_score":        similarity_map.get(fname, 0.0),
+                "semantic_skill_matches": semantic_skill_map.get(fname, set()),
             }
             for fname, info in extracted.items()
         ]
@@ -368,7 +393,7 @@ def screen():
 
         logger.info(
             "[Pipeline] Done — %d ranked | %d shortlisted | model: %s | %.1fs",
-            len(serialized), shortlisted, model_name, elapsed_s,
+            len(serialized), shortlisted, model_key, elapsed_s,
         )
 
         # ── Audit log ────────────────────────────────────────────────────────
@@ -387,7 +412,7 @@ def screen():
 
         return jsonify({
             "message":     "Screening complete.",
-            "model_used":  model_name,
+            "model_used":  model_key,
             "total":       len(serialized),
             "shortlisted": shortlisted,
             "results":     serialized,
@@ -455,7 +480,7 @@ def get_model():
 def set_model():
     """
     Switch the active embedding model for this session.
-    Body: { "model": "mpnet" | "mxbai" | "arctic" }
+    Body: { "model": "mpnet" | "mxbai" | "arctic" | "ensemble" }
     """
     global _active_model_key
     body      = request.get_json(silent=True) or {}
@@ -467,9 +492,10 @@ def set_model():
         }), 400
 
     _active_model_key = model_key
-    logger.info("[Model] Switched to %s", VALID_MODELS[model_key])
+    label = "all models (ensemble)" if model_key == "ensemble" else VALID_MODELS[model_key]
+    logger.info("[Model] Switched to %s", label)
     return jsonify({
-        "message":   f"Switched to {VALID_MODELS[model_key]}",
+        "message":   f"Switched to {label}",
         "active":    model_key,
         "full_name": VALID_MODELS[model_key],
     }), 200

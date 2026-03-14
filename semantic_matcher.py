@@ -14,6 +14,16 @@ ARCTIC_MODEL = "Snowflake/snowflake-arctic-embed-m-v1.5"
 # Default model used when no model is specified by the caller
 DEFAULT_MODEL = MPNET_MODEL
 
+# Ensemble model weights: all three models contribute, favouring stronger ones
+ENSEMBLE_WEIGHTS = {
+    MPNET_MODEL:  0.35,
+    MXBAI_MODEL:  0.40,
+    ARCTIC_MODEL: 0.25,
+}
+
+# Minimum cosine similarity between two skill phrases to count as a semantic match
+SKILL_SEMANTIC_THRESHOLD = 0.60
+
 # Text chunking settings (for handling long resumes)
 CHUNK_SIZE   = 300   # words per chunk
 CHUNK_STRIDE = 100   # overlap between consecutive chunks
@@ -204,3 +214,131 @@ def rank_resumes_by_similarity(
     results.sort(key=lambda x: x["similarity_score"], reverse=True)
     logger.info("[SemanticMatcher] Ranking complete.")
     return results
+
+
+def rank_resumes_ensemble(
+    resume_texts: dict,
+    job_description: str,
+    weights: dict | None = None,
+) -> list:
+    """
+    Rank resumes using an ensemble of all three embedding models.
+
+    Each model independently scores every resume.  The final similarity score
+    is the weighted average across models, producing a more robust signal than
+    any single model alone.
+
+    Args:
+        resume_texts:    dict of { filename: extracted_text }
+        job_description: Job description string
+        weights:         Optional dict { model_id: float }.
+                         Defaults to ENSEMBLE_WEIGHTS.
+
+    Returns:
+        List of { filename, similarity_score } sorted by score descending.
+    """
+    if weights is None:
+        weights = ENSEMBLE_WEIGHTS
+
+    total_weight = sum(weights.values())
+    models = list(weights.keys())
+
+    logger.info(
+        "[SemanticMatcher] Ensemble ranking %d resumes using %d models: %s",
+        len(resume_texts), len(models), models,
+    )
+
+    # Accumulate weighted scores per filename
+    accumulated: dict = {fname: 0.0 for fname in resume_texts}
+
+    for model_name, weight in weights.items():
+        model_results = rank_resumes_by_similarity(resume_texts, job_description, model_name)
+        for r in model_results:
+            accumulated[r["filename"]] += weight * r["similarity_score"]
+
+    # Normalise and build output list
+    results = [
+        {
+            "filename":         fname,
+            "similarity_score": round(float(np.clip(score / total_weight, 0.0, 1.0)), 4),
+        }
+        for fname, score in accumulated.items()
+    ]
+    results.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+    logger.info("[SemanticMatcher] Ensemble ranking complete.")
+    return results
+
+
+# ── Skill-level semantic matching ─────────────────────────────────────────────
+
+def compute_skill_semantic_matches(
+    candidate_skills: list,
+    required_skills: list,
+    model_name: str = DEFAULT_MODEL,
+    threshold: float = SKILL_SEMANTIC_THRESHOLD,
+) -> set:
+    """
+    Use embedding similarity to find required skills that semantically match
+    at least one of the candidate's skills.
+
+    This complements alias-based matching by capturing near-synonyms and
+    related concepts that are not listed in the static SKILL_ALIASES table.
+    For example:
+        • "verbal communication" → semantically matches "communication"
+        • "data analytics"       → semantically matches "analytics" / "business intelligence"
+        • "problem solving"      → semantically matches "critical thinking"
+        • "mysql"                → semantically matches "sql"
+
+    Note: The threshold (default 0.60) is intentionally conservative to avoid
+    matching conceptually distinct skills.  Increase it to tighten matching.
+
+    Args:
+        candidate_skills: list of skill strings extracted from the resume
+        required_skills:  list of skill strings the job requires
+        model_name:       embedding model to use for comparison
+        threshold:        cosine similarity cut-off (default 0.60)
+
+    Returns:
+        Set of required skill strings that have a semantic match.
+    """
+    if not candidate_skills or not required_skills:
+        return set()
+
+    model = _get_model(model_name)
+
+    # Embed all skill phrases in one batch for efficiency
+    req_embs  = model.encode(
+        required_skills,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    cand_embs = model.encode(
+        candidate_skills,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+
+    # Similarity matrix: shape [n_required, n_candidate]
+    sim_matrix = np.dot(req_embs, cand_embs.T)
+
+    matched = set()
+    for i, req_skill in enumerate(required_skills):
+        max_sim       = float(np.max(sim_matrix[i]))
+        best_cand_idx = int(np.argmax(sim_matrix[i]))
+        best_cand     = candidate_skills[best_cand_idx]
+        if max_sim >= threshold:
+            matched.add(req_skill)
+            logger.debug(
+                "[SemanticMatcher] Skill match  '%s' ↔ '%s'  sim=%.3f",
+                req_skill, best_cand, max_sim,
+            )
+        else:
+            logger.debug(
+                "[SemanticMatcher] Skill no-match '%s' (best=%.3f via '%s')",
+                req_skill, max_sim, best_cand,
+            )
+
+    return matched

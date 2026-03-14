@@ -16,7 +16,7 @@ import time
 
 from resume_parser       import load_resumes_from_folder
 from information_extractor import extract_all
-from semantic_matcher    import rank_resumes_by_similarity
+from semantic_matcher    import rank_resumes_by_similarity, rank_resumes_ensemble, compute_skill_semantic_matches
 from scoring_engine      import ScoringConfig, score_candidates, print_results
 
 
@@ -132,18 +132,28 @@ def run_pipeline(config_path: str = "config.json"):
 
     print()
 
-    # ── Step 3: Semantic similarity ───────────────────────────────────────
-    print("[Step 3] Computing semantic similarity...")
-    similarity_results = rank_resumes_by_similarity(resume_texts, job_description)
+    # ── Step 3: Ensemble semantic similarity (all 3 models) ───────────────
+    print("[Step 3] Computing ensemble semantic similarity (all 3 models)...")
+    similarity_results = rank_resumes_ensemble(resume_texts, job_description)
     similarity_map = {r["filename"]: r["similarity_score"] for r in similarity_results}
+
+    # ── Step 3b: Semantic skill matching ─────────────────────────────────
+    print("[Step 3b] Running semantic skill matching...")
+    semantic_skill_map = {}
+    for fname, info in extracted.items():
+        semantic_skill_map[fname] = compute_skill_semantic_matches(
+            info.get("skills", []),
+            required_skills,
+        )
 
     # ── Step 4: Score & rank ──────────────────────────────────────────────
     print("[Step 4] Scoring and ranking all candidates...")
     candidates = [
         {
-            "filename":      fname,
-            "info":          info,
-            "semantic_score": similarity_map.get(fname, 0.0),
+            "filename":               fname,
+            "info":                   info,
+            "semantic_score":         similarity_map.get(fname, 0.0),
+            "semantic_skill_matches": semantic_skill_map.get(fname, set()),
         }
         for fname, info in extracted.items()
     ]
