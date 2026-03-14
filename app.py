@@ -5,6 +5,7 @@ Flask backend for the AI Resume Screening System.
 Connects the React frontend to the Python ML pipeline.
 
 Endpoints:
+    GET  /api/health          → server health check
     POST /api/upload-resumes  → save uploaded PDFs to uploads/
     POST /api/screen          → run the full ML pipeline
     GET  /api/results         → return latest ranked results
@@ -14,19 +15,25 @@ Endpoints:
     GET  /api/model           → return currently active model
     POST /api/model           → switch active model
     POST /api/clear           → clear all uploads and results
+    GET  /api/export          → download latest results as CSV
+    GET  /api/audit           → return recent screening audit log
 
 Run:
     python app.py
     → http://localhost:5001
 """
 
-import os
+import csv
+import hashlib
+import io
 import json
 import logging
+import os
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
@@ -55,8 +62,13 @@ CORS(app)   # Allow React dev server (port 3000) to call this API (port 5001)
 UPLOAD_FOLDER = Path("uploads")
 RESULTS_FILE  = Path("last_results.json")
 CONFIG_FILE   = Path("config.json")
+AUDIT_FILE    = Path("audit.jsonl")
 
 UPLOAD_FOLDER.mkdir(exist_ok=True)
+
+# ── Upload limits ─────────────────────────────────────────────────────────────
+MAX_FILE_BYTES          = 10 * 1024 * 1024   # 10 MB per file
+MAX_AUDIT_JD_CHARS      = 120                # truncate long job descriptions in the audit log
 
 # ── Supported embedding models ────────────────────────────────────────────────
 # Maps short frontend key → full HuggingFace model ID (used by sentence-transformers)
@@ -86,10 +98,13 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    """Load config.json from disk, or return defaults if the file is missing."""
+    """Load config.json from disk, or return defaults if the file is missing or malformed."""
     if CONFIG_FILE.exists():
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
+        try:
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("[Config] Could not read config.json (%s) — using defaults.", e)
     return DEFAULT_CONFIG
 
 
@@ -102,6 +117,31 @@ def save_config(cfg: dict):
 def allowed_file(filename: str) -> bool:
     """Only PDF files are accepted."""
     return filename.lower().endswith(".pdf")
+
+
+def _file_sha256(file_storage) -> str:
+    """Return the SHA-256 hex digest of an uploaded file's contents."""
+    h = hashlib.sha256()
+    file_storage.stream.seek(0)
+    for chunk in iter(lambda: file_storage.stream.read(8192), b""):
+        h.update(chunk)
+    file_storage.stream.seek(0)
+    return h.hexdigest()
+
+
+def _existing_hashes() -> dict:
+    """
+    Build a map of { sha256_hex: filename } for all PDFs already in uploads/.
+    Used for content-based deduplication on each new upload.
+    """
+    hashes = {}
+    for pdf in UPLOAD_FOLDER.glob("*.pdf"):
+        try:
+            h = hashlib.sha256(pdf.read_bytes()).hexdigest()
+            hashes[h] = pdf.name
+        except OSError:
+            pass
+    return hashes
 
 
 def serialize_results(results: list) -> list:
@@ -136,39 +176,102 @@ def serialize_results(results: list) -> list:
     return serialized
 
 
+def _write_audit(entry: dict):
+    """Append a single screening audit record as a JSON line to audit.jsonl."""
+    try:
+        with open(AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as e:
+        logger.warning("[Audit] Could not write audit log: %s", e)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    """
+    Lightweight health-check endpoint.
+    Returns server status, active model, and pipeline readiness.
+    """
+    pdf_count = len(list(UPLOAD_FOLDER.glob("*.pdf")))
+    return jsonify({
+        "status":          "ok",
+        "timestamp":       datetime.now(timezone.utc).isoformat(),
+        "active_model":    _active_model_key,
+        "pdfs_uploaded":   pdf_count,
+        "results_ready":   RESULTS_FILE.exists(),
+    }), 200
+
 
 @app.route("/api/upload-resumes", methods=["POST"])
 def upload_resumes():
     """
     Accept one or more PDF files via multipart form-data.
-    Saves them to uploads/ and returns the saved filenames.
+    Enforces a 10 MB per-file limit and skips exact duplicate files
+    (content-hash based deduplication).
+    Saves accepted files to uploads/ and returns a detailed status.
     """
     if "files" not in request.files:
         return jsonify({"error": "No files provided"}), 400
 
-    files    = request.files.getlist("files")
-    saved    = []
-    rejected = []
+    files     = request.files.getlist("files")
+    saved     = []
+    rejected  = []
+    duplicates = []
+
+    existing_hashes = _existing_hashes()
 
     for file in files:
         if not file.filename:
             continue
+
+        # ── Type check ───────────────────────────────────────────────────────
         if not allowed_file(file.filename):
-            rejected.append(file.filename)
+            rejected.append({"filename": file.filename, "reason": "Not a PDF file"})
             continue
+
+        # ── Size check (read up to MAX+1 bytes to detect oversized files) ────
+        file.stream.seek(0, 2)          # seek to end
+        size = file.stream.tell()
+        file.stream.seek(0)
+        if size > MAX_FILE_BYTES:
+            mb = size / (1024 * 1024)
+            rejected.append({
+                "filename": file.filename,
+                "reason": f"File too large ({mb:.1f} MB > 10 MB limit)",
+            })
+            logger.warning("[Upload] Rejected oversized file: %s (%.1f MB)", file.filename, mb)
+            continue
+
+        # ── Deduplication check ──────────────────────────────────────────────
+        digest = _file_sha256(file)
+        if digest in existing_hashes:
+            duplicates.append({
+                "filename":   file.filename,
+                "matches":    existing_hashes[digest],
+            })
+            logger.info("[Upload] Duplicate skipped: %s (matches %s)", file.filename, existing_hashes[digest])
+            continue
+
+        # ── Save ─────────────────────────────────────────────────────────────
         filename = secure_filename(file.filename)
-        file.save(str(UPLOAD_FOLDER / filename))
+        dest = UPLOAD_FOLDER / filename
+        file.save(str(dest))
+        existing_hashes[digest] = filename   # update local cache for this batch
         saved.append(filename)
         logger.info("[Upload] Saved: %s", filename)
 
-    if not saved:
-        return jsonify({"error": "No valid PDF files uploaded", "rejected": rejected}), 400
+    if not saved and not duplicates:
+        return jsonify({
+            "error":    "No valid PDF files uploaded",
+            "rejected": rejected,
+        }), 400
 
     return jsonify({
-        "message":  f"{len(saved)} resume(s) uploaded.",
-        "saved":    saved,
-        "rejected": rejected,
+        "message":    f"{len(saved)} resume(s) uploaded.",
+        "saved":      saved,
+        "duplicates": duplicates,
+        "rejected":   rejected,
     }), 200
 
 
@@ -222,6 +325,8 @@ def screen():
     if not pdf_files:
         return jsonify({"error": "No resumes found. Upload PDFs first."}), 400
 
+    started_at = datetime.now(timezone.utc)
+
     try:
         # Step 1 — Parse PDFs
         logger.info("[Pipeline] Step 1 — Parsing %d PDF(s)...", len(pdf_files))
@@ -258,18 +363,33 @@ def screen():
         with open(RESULTS_FILE, "w") as f:
             json.dump(serialized, f, indent=2)
 
+        shortlisted = sum(1 for r in serialized if r["eligible"])
+        elapsed_s   = (datetime.now(timezone.utc) - started_at).total_seconds()
+
         logger.info(
-            "[Pipeline] Done — %d ranked | %d shortlisted | model: %s",
-            len(serialized),
-            sum(1 for r in serialized if r["eligible"]),
-            model_name,
+            "[Pipeline] Done — %d ranked | %d shortlisted | model: %s | %.1fs",
+            len(serialized), shortlisted, model_name, elapsed_s,
         )
+
+        # ── Audit log ────────────────────────────────────────────────────────
+        _write_audit({
+            "timestamp":        started_at.isoformat(),
+            "model":            model_key,
+            "total_resumes":    len(serialized),
+            "shortlisted":      shortlisted,
+            "rejected":         len(serialized) - shortlisted,
+            "elapsed_seconds":  round(elapsed_s, 2),
+            "job_description":  (job_description or "")[:MAX_AUDIT_JD_CHARS],
+            "required_skills":  required_skills,
+            "skill_weight":     round(scoring_cfg.skill_weight, 2),
+            "semantic_weight":  round(scoring_cfg.semantic_weight, 2),
+        })
 
         return jsonify({
             "message":     "Screening complete.",
             "model_used":  model_name,
             "total":       len(serialized),
-            "shortlisted": sum(1 for r in serialized if r["eligible"]),
+            "shortlisted": shortlisted,
             "results":     serialized,
         }), 200
 
@@ -283,8 +403,11 @@ def get_results():
     """Return the most recent screening results from disk."""
     if not RESULTS_FILE.exists():
         return jsonify({"error": "No results yet. Run /api/screen first."}), 404
-    with open(RESULTS_FILE) as f:
-        results = json.load(f)
+    try:
+        with open(RESULTS_FILE) as f:
+            results = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"error": f"Could not read results: {e}"}), 500
     return jsonify({"results": results, "total": len(results)}), 200
 
 
@@ -361,6 +484,86 @@ def clear_uploads():
         RESULTS_FILE.unlink()
     logger.info("[Clear] All uploads and results cleared.")
     return jsonify({"message": "Uploads and results cleared."}), 200
+
+
+@app.route("/api/export", methods=["GET"])
+def export_results():
+    """
+    Download the latest screening results as a CSV file.
+    Only shortlisted (eligible) candidates are included.
+    Returns 404 if no results have been generated yet.
+    """
+    if not RESULTS_FILE.exists():
+        return jsonify({"error": "No results available. Run screening first."}), 404
+
+    try:
+        with open(RESULTS_FILE) as f:
+            results = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return jsonify({"error": f"Could not read results: {e}"}), 500
+
+    shortlisted = [r for r in results if r.get("eligible")]
+    if not shortlisted:
+        return jsonify({"error": "No shortlisted candidates to export."}), 404
+
+    output = io.StringIO()
+    fieldnames = ["rank", "name", "email", "phone", "experience", "skill_score_pct",
+                  "semantic_score_pct", "final_score_pct", "matched_skills", "missing_skills", "filename"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for r in shortlisted:
+        writer.writerow({
+            "rank":               r.get("rank", ""),
+            "name":               r.get("name", ""),
+            "email":              r.get("email", ""),
+            "phone":              r.get("phone", ""),
+            "experience":         r.get("experience", 0),
+            "skill_score_pct":    f"{r.get('skillScore', 0) * 100:.1f}%",
+            "semantic_score_pct": f"{r.get('semanticScore', 0) * 100:.1f}%",
+            "final_score_pct":    f"{r.get('finalScore', 0) * 100:.1f}%",
+            "matched_skills":     "; ".join(r.get("matched_skills", [])),
+            "missing_skills":     "; ".join(r.get("missing_skills", [])),
+            "filename":           r.get("filename", ""),
+        })
+
+    csv_bytes = output.getvalue().encode("utf-8")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Response(
+        csv_bytes,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=shortlisted_{timestamp}.csv"},
+    )
+
+
+@app.route("/api/audit", methods=["GET"])
+def get_audit():
+    """
+    Return the last N screening audit log entries.
+    Query param: ?limit=20 (default 20, max 100)
+    """
+    try:
+        limit = min(int(request.args.get("limit", 20)), 100)
+    except (ValueError, TypeError):
+        limit = 20
+
+    if not AUDIT_FILE.exists():
+        return jsonify({"entries": [], "total": 0}), 200
+
+    try:
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()
+        entries = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        # Most-recent first
+        entries.reverse()
+        return jsonify({"entries": entries[:limit], "total": len(entries)}), 200
+    except OSError as e:
+        return jsonify({"error": f"Could not read audit log: {e}"}), 500
 
 
 # ── Serve React build (production) ────────────────────────────────────────────
