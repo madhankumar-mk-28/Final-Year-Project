@@ -14,7 +14,7 @@ import {
 // ─── THEMES ───────────────────────────────────────────────────────────────────
 const DARK = {
     bg: "#07070f", surface: "rgba(255,255,255,0.03)", border: "rgba(255,255,255,0.07)",
-    text: "#e2e2f0", sub: "#6b6b8a", muted: "#3a3a52",
+    text: "#e2e2f0", sub: "#6b6b8a", muted: "#484864",
     blue: "#818cf8", green: "#22c55e", amber: "#f59e0b", pink: "#f472b6", teal: "#34d399",
     sidebarBg: "rgba(255,255,255,0.015)", topbarBg: "#07070f",
     inputBg: "rgba(255,255,255,0.045)", cardText: "#c4c4d8",
@@ -23,7 +23,7 @@ const DARK = {
 };
 const LIGHT = {
     bg: "#f1f3fa", surface: "#ffffff", border: "rgba(0,0,0,0.08)",
-    text: "#111827", sub: "#6b7280", muted: "#d1d5db",
+    text: "#111827", sub: "#6b7280", muted: "#9ca3af",
     blue: "#6366f1", green: "#16a34a", amber: "#d97706", pink: "#db2777", teal: "#0d9488",
     sidebarBg: "#e8eaf4", topbarBg: "#ffffff",
     inputBg: "rgba(0,0,0,0.04)", cardText: "#374151",
@@ -979,9 +979,9 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                                     interval={0} />
                                 <YAxis hide domain={[0, 100]} />
                                 <Tooltip
-                                    cursor={{ fill: "rgba(255,255,255,0.04)", radius: 4 }}
-                                    contentStyle={{ background: "rgba(10,10,22,0.92)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, fontSize: 11, backdropFilter: "blur(10px)", boxShadow: "0 8px 32px rgba(0,0,0,.55)", color: "#e2e2f0" }}
-                                    labelStyle={{ color: "#a0a0c0", fontWeight: 700 }} />
+                                    cursor={{ fill: `${C.blue}08`, radius: 4 }}
+                                    contentStyle={{ background: C.drawerBg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 11, backdropFilter: "blur(10px)", boxShadow: "0 8px 32px rgba(0,0,0,.35)", color: C.text }}
+                                    labelStyle={{ color: C.sub, fontWeight: 700 }} />
                                 <Bar dataKey="Skill" fill={C.blue} radius={[3, 3, 0, 0]} />
                                 <Bar dataKey="Semantic" fill={C.teal} radius={[3, 3, 0, 0]} />
                                 <Bar dataKey="Final" fill={C.amber} radius={[3, 3, 0, 0]} />
@@ -1365,8 +1365,8 @@ const AnalyticsView = ({ results, isMobile }) => {
         v: Math.round(55 + ((i * 37 + 13) % 40)),
     })) : [];
 
-    const TOOLTIP = { background: "rgba(10,10,22,0.92)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, fontSize: 11, backdropFilter: "blur(10px)", boxShadow: "0 8px 32px rgba(0,0,0,.55)", color: "#e2e2f0" };
-    const LABEL = { color: "#a0a0c0", fontWeight: 700 };
+    const TOOLTIP = { background: C.drawerBg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 11, backdropFilter: "blur(10px)", boxShadow: "0 8px 32px rgba(0,0,0,.35)", color: C.text };
+    const LABEL = { color: C.sub, fontWeight: 700 };
 
     return (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1402,7 +1402,7 @@ const AnalyticsView = ({ results, isMobile }) => {
                             <CartesianGrid stroke={C.border} horizontal={false} />
                             <XAxis type="number" domain={[0, 100]} tick={{ fill: C.sub, fontSize: 10 }} axisLine={false} tickLine={false} />
                             <YAxis type="category" dataKey="name" tick={{ fill: C.sub, fontSize: 10 }} axisLine={false} tickLine={false} width={60} />
-                            <Tooltip cursor={{ fill: "rgba(255,255,255,0.04)" }} contentStyle={TOOLTIP} labelStyle={LABEL} />
+                            <Tooltip cursor={{ fill: `${C.blue}08` }} contentStyle={TOOLTIP} labelStyle={LABEL} />
                             <Bar dataKey="Skill" fill={C.blue} radius={[0, 3, 3, 0]} />
                             <Bar dataKey="Semantic" fill={C.teal} radius={[0, 3, 3, 0]} />
                             <Bar dataKey="Final" fill={C.amber} radius={[0, 3, 3, 0]} />
