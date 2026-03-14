@@ -148,6 +148,13 @@ def _skill_score(candidate_skills: list, required_skills: list) -> tuple:
 
 def is_eligible(info: dict, config: ScoringConfig) -> tuple:
     """Hard filter. Returns (eligible: bool, reason: str)."""
+
+    # Reject if neither email nor phone is present
+    email = (info.get("email") or "").strip()
+    phone = (info.get("phone") or "").strip()
+    if not email and not phone:
+        return False, "No contact details found"
+
     exp = info.get("experience_years", 0.0)
     if config.min_experience_years > 0 and exp < config.min_experience_years:
         return False, f"Experience {exp}y < required {config.min_experience_years}y"

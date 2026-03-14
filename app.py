@@ -91,7 +91,7 @@ DEFAULT_CONFIG = {
         "semantic_weight":      0.45,
         "min_experience_years": 0.0,
         "required_education":   [],
-        "top_n":                20,
+        "top_n":                50,
         "min_final_score":      0.0,
     },
 }

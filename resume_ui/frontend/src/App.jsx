@@ -1,14 +1,14 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import {
     LayoutDashboard, Briefcase, Users, BarChart2, Upload, X, Check, Plus,
-    FileText, TrendingUp, Award, Mail, GraduationCap, ChevronRight,
+    FileText, TrendingUp, Award, Mail, ChevronRight,
     Sparkles, Clock, Star, AlertCircle, CheckCircle, Zap, ArrowRight,
-    RefreshCw, Sun, Moon, Edit3, Save, Cpu, Activity, Target, Download,
+    RefreshCw, Sun, Moon, Edit3, Save, Activity, Target, Download,
     Menu, ChevronDown, Info, Phone,
 } from "lucide-react";
 import {
     BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-    RadarChart, PolarGrid, PolarAngleAxis, Radar, CartesianGrid, Cell,
+    RadarChart, PolarGrid, PolarAngleAxis, Radar, CartesianGrid,
 } from "recharts";
 
 // ─── THEMES ───────────────────────────────────────────────────────────────────
@@ -20,6 +20,8 @@ const DARK = {
     inputBg: "rgba(255,255,255,0.045)", cardText: "#c4c4d8",
     drawerBg: "#0d0d1b", scrollThumb: "rgba(255,255,255,0.08)",
     chartTooltip: "#0d0d1b", tableFocus: "rgba(129,140,248,0.05)",
+    // Professional, non-neon chart fill colours
+    chartSkill: "#7b93cc", chartSemantic: "#3d9e87", chartFinal: "#c98d3e",
 };
 const LIGHT = {
     bg: "#f1f3fa", surface: "#ffffff", border: "rgba(0,0,0,0.08)",
@@ -29,6 +31,20 @@ const LIGHT = {
     inputBg: "rgba(0,0,0,0.04)", cardText: "#374151",
     drawerBg: "#f8f9fc", scrollThumb: "rgba(0,0,0,0.1)",
     chartTooltip: "#ffffff", tableFocus: "rgba(99,102,241,0.05)",
+    // Professional, non-neon chart fill colours
+    chartSkill: "#4a6fa5", chartSemantic: "#2a7c6b", chartFinal: "#b07030",
+};
+
+// Palette for multi-candidate comparison radar
+const COMPARE_COLORS = ["#818cf8", "#34d399", "#f472b6", "#f59e0b", "#38bdf8", "#a78bfa", "#fb923c"];
+
+// Helper: derive a short display name that avoids truncating on a 1-2 char prefix
+const shortDisplayName = (fullName, maxLen = 13) => {
+    const parts = (fullName || "?").split(" ").filter(Boolean);
+    let nm = parts[0] || "?";
+    let pi = 1;
+    while (nm.length <= 2 && pi < parts.length) { nm = parts.slice(0, pi + 1).join(" "); pi++; }
+    return nm.slice(0, maxLen);
 };
 
 // Module-level theme ref — updated at top of each App render
@@ -347,7 +363,7 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
     const allSkills = c.skills || [];
     const missing = allSkills.filter(s => !matched.includes(s));
     const radarData = matched.slice(0, 6).map((s, i) => ({
-        s: s.length > 7 ? s.slice(0, 6) + "…" : s,
+        s,
         v: Math.round(55 + ((i * 37 + 13) % 40)),
     }));
 
@@ -398,7 +414,7 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
                 {/* Info rows */}
                 <div style={card({ padding: "4px 16px" })}>
                     {[
-                        { icon: Mail, label: "Email", value: c.email || "—", href: c.email ? `mailto:${c.email}` : null },
+                        { icon: Mail, label: "Email", value: c.email || "Not Found", href: c.email ? `mailto:${c.email}` : null },
                         { icon: Clock, label: "Experience", value: !c.experience ? "Fresher" : `${c.experience} yrs`, href: null },
                         { icon: Phone, label: "Phone", value: c.phone || c.phone_number || c.contact || c.mobile || c.contact_number || "Not found", href: (c.phone || c.phone_number || c.contact || c.mobile || c.contact_number) ? `tel:${(c.phone || c.phone_number || c.contact || c.mobile || c.contact_number || "").replace(/\s/g, "")}` : null },
                     ].map(({ icon: Icon, label, value, href }) => (
@@ -426,11 +442,11 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
                 {radarData.length >= 3 && (
                     <div style={card()}>
                         <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>Skill Radar</div>
-                        <ResponsiveContainer width="100%" height={165}>
-                            <RadarChart data={radarData}>
+                        <ResponsiveContainer width="100%" height={220}>
+                            <RadarChart data={radarData} outerRadius="68%">
                                 <PolarGrid stroke={C.border} />
                                 <PolarAngleAxis dataKey="s" tick={{ fill: C.sub, fontSize: 10 }} />
-                                <Radar dataKey="v" stroke={C.blue} fill={C.blue} fillOpacity={0.14} strokeWidth={2} />
+                                <Radar dataKey="v" stroke={C.chartSkill} fill={C.chartSkill} fillOpacity={0.18} strokeWidth={2} dot={{ fill: C.chartSkill, r: 3 }} />
                             </RadarChart>
                         </ResponsiveContainer>
                     </div>
@@ -816,6 +832,7 @@ const ProcessingView = ({ config, onDone }) => {
 
         run();
         return () => clearInterval(ivRef.current);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const pct = Math.round(progress);
@@ -920,7 +937,12 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
     const eligible = results.filter(c => c.eligible);
     const top = eligible[0] || results[0];
     const avgScore = eligible.length ? Math.round(eligible.reduce((a, c) => a + (c.finalScore || 0), 0) / eligible.length * 100) : 0;
-    const scoreDist = eligible.slice(0, 8).map(c => ({ name: (c.name || "?").split(" ")[0].slice(0, 9), Skill: Math.round((c.skillScore || 0) * 100), Semantic: Math.round((c.semanticScore || 0) * 100), Final: Math.round((c.finalScore || 0) * 100) }));
+    const scoreDist = eligible.slice(0, 8).map(c => ({
+        name: shortDisplayName(c.name),
+        Skill: Math.round((c.skillScore || 0) * 100),
+        Semantic: Math.round((c.semanticScore || 0) * 100),
+        Final: Math.round((c.finalScore || 0) * 100),
+    }));
     const cols4 = isMobile ? "1fr 1fr" : "repeat(4,1fr)";
     const cols2 = isMobile ? "1fr" : "1fr 1.65fr";
 
@@ -982,13 +1004,13 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                                     cursor={{ fill: `${C.blue}08`, radius: 4 }}
                                     contentStyle={{ background: C.drawerBg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 11, backdropFilter: "blur(10px)", boxShadow: "0 8px 32px rgba(0,0,0,.35)", color: C.text }}
                                     labelStyle={{ color: C.sub, fontWeight: 700 }} />
-                                <Bar dataKey="Skill" fill={C.blue} radius={[3, 3, 0, 0]} />
-                                <Bar dataKey="Semantic" fill={C.teal} radius={[3, 3, 0, 0]} />
-                                <Bar dataKey="Final" fill={C.amber} radius={[3, 3, 0, 0]} />
+                                <Bar dataKey="Skill" fill={C.chartSkill} radius={[3, 3, 0, 0]} />
+                                <Bar dataKey="Semantic" fill={C.chartSemantic} radius={[3, 3, 0, 0]} />
+                                <Bar dataKey="Final" fill={C.chartFinal} radius={[3, 3, 0, 0]} />
                             </BarChart>
                         </ResponsiveContainer>
                         <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 4 }}>
-                            {[["Skill", C.blue], ["Semantic", C.teal], ["Final", C.amber]].map(([l, c]) => (
+                            {[["Skill", C.chartSkill], ["Semantic", C.chartSemantic], ["Final", C.chartFinal]].map(([l, c]) => (
                                 <div key={l} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: C.sub }}>
                                     <div style={{ width: 7, height: 7, borderRadius: 2, background: c }} />{l}
                                 </div>
@@ -1155,7 +1177,7 @@ const CandidatesView = ({ results, onNav, isMobile }) => {
                                             </div>
                                             <div>
                                                 <div style={{ fontSize: 13, fontWeight: 600, color: C.text, whiteSpace: "nowrap" }}>{c.name || "Unknown"}</div>
-                                                <div style={{ fontSize: 11, color: C.sub }}>{c.email || "—"}</div>
+                                                <div style={{ fontSize: 11, color: c.email ? C.sub : C.muted }}>{c.email || "Not Found"}</div>
                                             </div>
                                         </div>
                                     </td>
@@ -1317,6 +1339,116 @@ const JobConfigView = () => {
     );
 };
 
+// ─── CANDIDATE COMPARISON CHART (PUBG-style) ──────────────────────────────────
+const CandidateComparisonChart = ({ eligible, allCandidates, isMobile }) => {
+    const pool = (eligible.length >= 2 ? eligible : allCandidates).slice(0, 15);
+    const defaultIds = pool.slice(0, Math.min(3, pool.length)).map(c => c.id);
+    const [selectedIds, setSelectedIds] = useState(defaultIds);
+
+    const toggleCandidate = (id) => {
+        setSelectedIds(prev => {
+            if (prev.includes(id)) {
+                if (prev.length <= 2) return prev;   // keep minimum 2
+                return prev.filter(x => x !== id);
+            }
+            if (prev.length >= 6) return prev;       // cap at 6
+            return [...prev, id];
+        });
+    };
+
+    const maxExp = Math.max(...pool.map(c => c.experience || 0), 1);
+    const maxMatched = Math.max(...pool.map(c => (c.matched_skills || []).length), 1);
+
+    const axes = ["Skill Match", "Semantic", "Final Score", "Experience", "Skills Hit"];
+    const radarData = axes.map(axis => {
+        const point = { axis };
+        selectedIds.forEach(id => {
+            const c = pool.find(r => r.id === id);
+            if (!c) return;
+            if (axis === "Skill Match")  point[`c_${id}`] = Math.round((c.skillScore || 0) * 100);
+            else if (axis === "Semantic") point[`c_${id}`] = Math.round((c.semanticScore || 0) * 100);
+            else if (axis === "Final Score") point[`c_${id}`] = Math.round((c.finalScore || 0) * 100);
+            else if (axis === "Experience") point[`c_${id}`] = Math.round(Math.min((c.experience || 0) / Math.max(maxExp, 5) * 100, 100));
+            else if (axis === "Skills Hit") point[`c_${id}`] = Math.round(Math.min((c.matched_skills || []).length / Math.max(maxMatched, 1) * 100, 100));
+        });
+        return point;
+    });
+
+    const selectedCandidates = selectedIds.map(id => pool.find(c => c.id === id)).filter(Boolean);
+
+    return (
+        <div style={card({ padding: 18 })}>
+            {/* Header */}
+            <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
+                    Candidate Comparison
+                </div>
+                <div style={{ fontSize: 12, color: C.cardText, lineHeight: 1.6 }}>
+                    Select 2–6 candidates to compare across 5 dimensions on a radar chart. Default shows the top 3.
+                </div>
+            </div>
+
+            {/* Selector chips */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+                {pool.map(c => {
+                    const isSelected = selectedIds.includes(c.id);
+                    const colorIdx = selectedIds.indexOf(c.id);
+                    const col = colorIdx >= 0 ? COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] : C.border;
+                    return (
+                        <button key={c.id} onClick={() => toggleCandidate(c.id)} style={{
+                            padding: "4px 11px", borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                            background: isSelected ? `${col}18` : C.inputBg,
+                            color: isSelected ? col : C.sub,
+                            border: `1.5px solid ${isSelected ? col : C.border}`,
+                            fontFamily: "inherit", transition: "all .15s",
+                            display: "flex", alignItems: "center", gap: 5,
+                        }}>
+                            {isSelected && <div style={{ width: 6, height: 6, borderRadius: "50%", background: col, flexShrink: 0 }} />}
+                            {c.name || `Candidate ${c.id}`}
+                        </button>
+                    );
+                })}
+            </div>
+
+            {/* Radar */}
+            <ResponsiveContainer width="100%" height={isMobile ? 270 : 340}>
+                <RadarChart data={radarData} outerRadius="62%" margin={{ top: 15, right: 40, bottom: 15, left: 40 }}>
+                    <PolarGrid stroke={C.border} strokeDasharray="3 3" />
+                    <PolarAngleAxis dataKey="axis" tick={{ fill: C.sub, fontSize: isMobile ? 10 : 12, fontWeight: 600 }} />
+                    {selectedCandidates.map((c, idx) => {
+                        const col = COMPARE_COLORS[idx % COMPARE_COLORS.length];
+                        return (
+                            <Radar key={c.id} name={c.name || `#${c.id}`} dataKey={`c_${c.id}`}
+                                stroke={col} fill={col} fillOpacity={0.18} strokeWidth={2}
+                                dot={{ fill: col, r: 3 }} />
+                        );
+                    })}
+                    <Tooltip
+                        contentStyle={{ background: C.drawerBg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 11, color: C.text }}
+                        labelStyle={{ color: C.sub, fontWeight: 700 }}
+                        formatter={(value, name) => [`${value}%`, name]}
+                    />
+                </RadarChart>
+            </ResponsiveContainer>
+
+            {/* Legend */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 14, justifyContent: "center", marginTop: 8 }}>
+                {selectedCandidates.map((c, idx) => {
+                    const col = COMPARE_COLORS[idx % COMPARE_COLORS.length];
+                    const fs = Math.round((c.finalScore || 0) * 100);
+                    return (
+                        <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+                            <div style={{ width: 10, height: 10, borderRadius: 2, background: col, flexShrink: 0 }} />
+                            <span style={{ color: C.sub, fontWeight: 600 }}>{c.name || `Candidate ${c.id}`}</span>
+                            <span style={{ color: col, fontWeight: 700 }}>— {fs}%</span>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
 // ─── ANALYTICS VIEW ───────────────────────────────────────────────────────────
 const AnalyticsView = ({ results, isMobile }) => {
     if (!results || results.length === 0) {
@@ -1334,16 +1466,17 @@ const AnalyticsView = ({ results, isMobile }) => {
     const scoreDist = [...results]
         .sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0))
         .map(c => ({
-            name: (c.name || "?").split(" ")[0],
+            name: shortDisplayName(c.name),
             Final: Math.round((c.finalScore || 0) * 100),
             Skill: Math.round((c.skillScore || 0) * 100),
             Semantic: Math.round((c.semanticScore || 0) * 100),
         }));
 
-    // Skill frequency — how many candidates matched each skill
+    // Skill frequency — how many candidates matched each skill (available for future extension)
     const skillCount = {};
     results.forEach(c => (c.matched_skills || []).forEach(s => { skillCount[s] = (skillCount[s] || 0) + 1; }));
-    const skillFreq = Object.entries(skillCount)
+    // eslint-disable-next-line no-unused-vars
+    const _skillFreq = Object.entries(skillCount)
         .map(([skill, count]) => ({ skill, count }))
         .sort((a, b) => b.count - a.count)
         .slice(0, 10);
@@ -1358,10 +1491,9 @@ const AnalyticsView = ({ results, isMobile }) => {
         else if (s <= 80) buckets["61–80"]++;
         else buckets["81–100"]++;
     });
-    const bucketData = Object.entries(buckets).map(([range, count]) => ({ range, count }));
 
     const topRadar = top ? (top.matched_skills || []).slice(0, 6).map((s, i) => ({
-        s: s.length > 8 ? s.slice(0, 7) + "…" : s,
+        s,
         v: Math.round(55 + ((i * 37 + 13) % 40)),
     })) : [];
 
@@ -1403,13 +1535,13 @@ const AnalyticsView = ({ results, isMobile }) => {
                             <XAxis type="number" domain={[0, 100]} tick={{ fill: C.sub, fontSize: 10 }} axisLine={false} tickLine={false} />
                             <YAxis type="category" dataKey="name" tick={{ fill: C.sub, fontSize: 10 }} axisLine={false} tickLine={false} width={60} />
                             <Tooltip cursor={{ fill: `${C.blue}08` }} contentStyle={TOOLTIP} labelStyle={LABEL} />
-                            <Bar dataKey="Skill" fill={C.blue} radius={[0, 3, 3, 0]} />
-                            <Bar dataKey="Semantic" fill={C.teal} radius={[0, 3, 3, 0]} />
-                            <Bar dataKey="Final" fill={C.amber} radius={[0, 3, 3, 0]} />
+                            <Bar dataKey="Skill" fill={C.chartSkill} radius={[0, 3, 3, 0]} />
+                            <Bar dataKey="Semantic" fill={C.chartSemantic} radius={[0, 3, 3, 0]} />
+                            <Bar dataKey="Final" fill={C.chartFinal} radius={[0, 3, 3, 0]} />
                         </BarChart>
                     </ResponsiveContainer>
                     <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 8 }}>
-                        {[["Skill", C.blue], ["Semantic", C.teal], ["Final", C.amber]].map(([l, c]) => (
+                        {[["Skill", C.chartSkill], ["Semantic", C.chartSemantic], ["Final", C.chartFinal]].map(([l, c]) => (
                             <div key={l} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: C.sub }}>
                                 <div style={{ width: 7, height: 7, borderRadius: 2, background: c }} />{l}
                             </div>
@@ -1476,11 +1608,11 @@ const AnalyticsView = ({ results, isMobile }) => {
                         <div style={{ textAlign: "center", marginBottom: 6 }}>
                             <span style={{ fontSize: 14, fontWeight: 800, color: C.blue, background: `${C.blue}12`, padding: "3px 14px", borderRadius: 20, border: `1px solid ${C.blue}30` }}>{top.name}</span>
                         </div>
-                        <ResponsiveContainer width="100%" height={200}>
-                            <RadarChart data={topRadar} margin={{ top: 5, right: 20, bottom: 5, left: 20 }}>
+                        <ResponsiveContainer width="100%" height={240}>
+                            <RadarChart data={topRadar} outerRadius="68%" margin={{ top: 10, right: 25, bottom: 10, left: 25 }}>
                                 <PolarGrid stroke={C.border} />
                                 <PolarAngleAxis dataKey="s" tick={{ fill: C.sub, fontSize: 10 }} />
-                                <Radar dataKey="v" stroke={C.blue} fill={C.blue} fillOpacity={0.18} strokeWidth={2.5} dot={{ fill: C.blue, r: 3 }} />
+                                <Radar dataKey="v" stroke={C.chartSkill} fill={C.chartSkill} fillOpacity={0.18} strokeWidth={2.5} dot={{ fill: C.chartSkill, r: 3 }} />
                             </RadarChart>
                         </ResponsiveContainer>
                     </div>
@@ -1534,12 +1666,13 @@ const AnalyticsView = ({ results, isMobile }) => {
                         const count = buckets[range] || 0;
                         const pct = results.length ? Math.round(count / results.length * 100) : 0;
                         const col = range === "81–100" ? C.green : range === "61–80" ? C.blue : range === "41–60" ? C.teal : range === "21–40" ? C.amber : "#ef4444";
+                        const empty = count === 0;
                         return (
-                            <div key={range} style={{ textAlign: "center", padding: "14px 8px", borderRadius: 12, background: `${col}08`, border: `1px solid ${col}25` }}>
-                                <div style={{ fontSize: 26, fontWeight: 900, color: col, lineHeight: 1 }}>{count}</div>
-                                <div style={{ fontSize: 9, color: col, fontWeight: 700, marginTop: 3, textTransform: "uppercase", letterSpacing: ".05em" }}>{label}</div>
+                            <div key={range} style={{ textAlign: "center", padding: "14px 8px", borderRadius: 12, background: empty ? `${C.muted}06` : `${col}08`, border: `1px solid ${empty ? C.border : `${col}25`}`, opacity: empty ? 0.4 : 1, transition: "opacity .2s" }}>
+                                <div style={{ fontSize: 26, fontWeight: 900, color: empty ? C.muted : col, lineHeight: 1 }}>{count}</div>
+                                <div style={{ fontSize: 9, color: empty ? C.muted : col, fontWeight: 700, marginTop: 3, textTransform: "uppercase", letterSpacing: ".05em" }}>{label}</div>
                                 <div style={{ fontSize: 10, color: C.sub, margin: "3px 0 1px" }}>{range}</div>
-                                <div style={{ fontSize: 10, fontWeight: 700, color: col }}>{pct}%</div>
+                                <div style={{ fontSize: 10, fontWeight: 700, color: empty ? C.muted : col }}>{pct}%</div>
                                 <div style={{ fontSize: 9, color: C.muted, marginTop: 3 }}>{desc}</div>
                             </div>
                         );
@@ -1567,6 +1700,11 @@ const AnalyticsView = ({ results, isMobile }) => {
                     ))}
                 </div>
             </div>
+
+            {/* ── Candidate Comparison (PUBG-style radar) ──────────────────── */}
+            {results.length >= 2 && (
+                <CandidateComparisonChart eligible={eligible} allCandidates={results} isMobile={isMobile} />
+            )}
 
         </div>
     );
@@ -1669,7 +1807,7 @@ export default function App() {
                     </div>
                 </div>
                 {/* Developer credit */}
-                <div style={{ marginTop: 10, padding: "7px 9px", borderRadius: 8, background: `${C.blue}08`, border: `1px solid ${C.blue}18` }}>
+                <div style={{ marginTop: 20, padding: "7px 9px", borderRadius: 8, background: `${C.blue}08`, border: `1px solid ${C.blue}18` }}>
                     <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 2 }}>Developed by</div>
                     <div style={{ fontSize: 12, fontWeight: 800, color: C.blue }}>Madhan Kumar</div>
                     <div style={{ fontSize: 9, color: C.sub }}>B.Sc CS · Final Year Project</div>
@@ -1714,7 +1852,7 @@ export default function App() {
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap');
         *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
         html { font-size:16px; }
-        body { background:${C.bg}; font-family:'Plus Jakarta Sans',sans-serif; color:${C.text}; -webkit-font-smoothing:antialiased; }
+        body { background:${C.bg}; font-family:'Plus Jakarta Sans',sans-serif; color:${C.text}; -webkit-font-smoothing:antialiased; font-weight:500; }
         ::-webkit-scrollbar { width:4px; height:4px; }
         ::-webkit-scrollbar-track { background:transparent; }
         ::-webkit-scrollbar-thumb { background:${C.scrollThumb}; border-radius:2px; }
