@@ -1,0 +1,10 @@
+flask
+flask-cors
+pdfplumber
+spacy
+sentence-transformers
+scikit-learn
+numpy
+pandas
+torch
+werkzeug
