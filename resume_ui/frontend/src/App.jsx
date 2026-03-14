@@ -12,27 +12,32 @@ import {
 } from "recharts";
 
 // ─── THEMES ───────────────────────────────────────────────────────────────────
+// Palette: Tailwind CSS v3 tokens (industry standard — used by Vercel, Linear, etc.)
 const DARK = {
-    bg: "#07070f", surface: "rgba(255,255,255,0.03)", border: "rgba(255,255,255,0.07)",
-    text: "#e2e2f0", sub: "#6b6b8a", muted: "#484864",
-    blue: "#818cf8", green: "#22c55e", amber: "#f59e0b", pink: "#f472b6", teal: "#34d399",
-    sidebarBg: "rgba(255,255,255,0.015)", topbarBg: "#07070f",
-    inputBg: "rgba(255,255,255,0.045)", cardText: "#c4c4d8",
-    drawerBg: "#0d0d1b", scrollThumb: "rgba(255,255,255,0.08)",
-    chartTooltip: "#0d0d1b", tableFocus: "rgba(129,140,248,0.05)",
-    // Professional, non-neon chart fill colours
-    chartSkill: "#7b93cc", chartSemantic: "#3d9e87", chartFinal: "#c98d3e",
+    // Zinc-950 base — the same near-black Vercel uses
+    bg: "#09090b", surface: "rgba(255,255,255,0.04)", border: "rgba(255,255,255,0.09)",
+    text: "#f4f4f5", sub: "#71717a", muted: "#52525b",
+    // Indigo-500 / Green-500 / Amber-500 / Pink-500 / Teal-500
+    blue: "#6366f1", green: "#22c55e", amber: "#f59e0b", pink: "#ec4899", teal: "#14b8a6",
+    sidebarBg: "rgba(255,255,255,0.02)", topbarBg: "rgba(9,9,11,0.90)",
+    inputBg: "rgba(255,255,255,0.05)", cardText: "#d4d4d8",
+    drawerBg: "#0f0f11", scrollThumb: "rgba(255,255,255,0.09)",
+    chartTooltip: "#0f0f11", tableFocus: "rgba(99,102,241,0.06)",
+    // Chart: Indigo-400 · Emerald-400 · Amber-400 — vibrant but not neon
+    chartSkill: "#818cf8", chartSemantic: "#34d399", chartFinal: "#fbbf24",
 };
 const LIGHT = {
-    bg: "#f1f3fa", surface: "#ffffff", border: "rgba(0,0,0,0.08)",
-    text: "#111827", sub: "#6b7280", muted: "#9ca3af",
-    blue: "#6366f1", green: "#16a34a", amber: "#d97706", pink: "#db2777", teal: "#0d9488",
-    sidebarBg: "#e8eaf4", topbarBg: "#ffffff",
-    inputBg: "rgba(0,0,0,0.04)", cardText: "#374151",
-    drawerBg: "#f8f9fc", scrollThumb: "rgba(0,0,0,0.1)",
-    chartTooltip: "#ffffff", tableFocus: "rgba(99,102,241,0.05)",
-    // Professional, non-neon chart fill colours
-    chartSkill: "#4a6fa5", chartSemantic: "#2a7c6b", chartFinal: "#b07030",
+    // Slate-50 base — clean GitHub-style background
+    bg: "#f8fafc", surface: "#ffffff", border: "rgba(0,0,0,0.08)",
+    text: "#0f172a", sub: "#64748b", muted: "#94a3b8",
+    // Indigo-600 / Green-600 / Amber-600 / Pink-600 / Teal-600
+    blue: "#4f46e5", green: "#16a34a", amber: "#d97706", pink: "#db2777", teal: "#0d9488",
+    sidebarBg: "#f1f5f9", topbarBg: "#ffffff",
+    inputBg: "rgba(0,0,0,0.04)", cardText: "#334155",
+    drawerBg: "#f8fafc", scrollThumb: "rgba(0,0,0,0.10)",
+    chartTooltip: "#ffffff", tableFocus: "rgba(79,70,229,0.05)",
+    // Chart: Indigo-500 · Emerald-500 · Amber-500
+    chartSkill: "#6366f1", chartSemantic: "#10b981", chartFinal: "#f59e0b",
 };
 
 // Helper: derive a short display name that avoids truncating on a 1-2 char prefix
@@ -1337,12 +1342,15 @@ const JobConfigView = () => {
 };
 
 // ─── SKILL COVERAGE ANALYSIS ───────────────────────────────────────────────────
+// Score-range colours follow the Tailwind v3 semantic scale:
+//   Excellent → Emerald-500  |  Good → Indigo-500  |  Average → Amber-500
+//   Below Avg → Orange-500   |  Very Low → Red-500
 const getScoreRangeColor = (range) => {
-    if (range === "81–100") return "#4aba91";
-    if (range === "61–80")  return "#5b9bd5";
-    if (range === "41–60")  return "#d4a843";
-    if (range === "21–40")  return "#e8854a";
-    return "#e74c5e";
+    if (range === "81–100") return "#10b981";   // emerald-500
+    if (range === "61–80")  return "#6366f1";   // indigo-500
+    if (range === "41–60")  return "#f59e0b";   // amber-500
+    if (range === "21–40")  return "#f97316";   // orange-500
+    return "#ef4444";                           // red-500
 };
 
 const getCoverageColor = (pct) => {
