@@ -35,9 +35,6 @@ const LIGHT = {
     chartSkill: "#4a6fa5", chartSemantic: "#2a7c6b", chartFinal: "#b07030",
 };
 
-// Palette for multi-candidate comparison radar
-const COMPARE_COLORS = ["#818cf8", "#34d399", "#f472b6", "#f59e0b", "#38bdf8", "#a78bfa", "#fb923c"];
-
 // Helper: derive a short display name that avoids truncating on a 1-2 char prefix
 const shortDisplayName = (fullName, maxLen = 13) => {
     const parts = (fullName || "?").split(" ").filter(Boolean);
@@ -1339,112 +1336,61 @@ const JobConfigView = () => {
     );
 };
 
-// ─── CANDIDATE COMPARISON CHART (PUBG-style) ──────────────────────────────────
-const CandidateComparisonChart = ({ eligible, allCandidates, isMobile }) => {
-    const pool = (eligible.length >= 2 ? eligible : allCandidates).slice(0, 15);
-    const defaultIds = pool.slice(0, Math.min(3, pool.length)).map(c => c.id);
-    const [selectedIds, setSelectedIds] = useState(defaultIds);
+// ─── SKILL COVERAGE ANALYSIS ───────────────────────────────────────────────────
+const SkillCoverageAnalysis = ({ results, isMobile }) => {
+    const skillCount = {};
+    const skillTotal = results.length || 1;
+    results.forEach(c => (c.matched_skills || []).forEach(s => { skillCount[s] = (skillCount[s] || 0) + 1; }));
 
-    const toggleCandidate = (id) => {
-        setSelectedIds(prev => {
-            if (prev.includes(id)) {
-                if (prev.length <= 2) return prev;   // keep minimum 2
-                return prev.filter(x => x !== id);
-            }
-            if (prev.length >= 6) return prev;       // cap at 6
-            return [...prev, id];
-        });
-    };
+    const missingCount = {};
+    results.forEach(c => (c.missing_skills || []).forEach(s => { missingCount[s] = (missingCount[s] || 0) + 1; }));
 
-    const maxExp = Math.max(...pool.map(c => c.experience || 0), 1);
-    const maxMatched = Math.max(...pool.map(c => (c.matched_skills || []).length), 1);
+    const allSkills = new Set([...Object.keys(skillCount), ...Object.keys(missingCount)]);
+    const skillData = [...allSkills].map(skill => ({
+        skill,
+        matched: skillCount[skill] || 0,
+        missing: missingCount[skill] || 0,
+        coverage: Math.round(((skillCount[skill] || 0) / skillTotal) * 100),
+    })).sort((a, b) => b.coverage - a.coverage);
 
-    const axes = ["Skill Match", "Semantic", "Final Score", "Experience", "Skills Hit"];
-    const radarData = axes.map(axis => {
-        const point = { axis };
-        selectedIds.forEach(id => {
-            const c = pool.find(r => r.id === id);
-            if (!c) return;
-            if (axis === "Skill Match")  point[`c_${id}`] = Math.round((c.skillScore || 0) * 100);
-            else if (axis === "Semantic") point[`c_${id}`] = Math.round((c.semanticScore || 0) * 100);
-            else if (axis === "Final Score") point[`c_${id}`] = Math.round((c.finalScore || 0) * 100);
-            else if (axis === "Experience") point[`c_${id}`] = Math.round(Math.min((c.experience || 0) / Math.max(maxExp, 5) * 100, 100));
-            else if (axis === "Skills Hit") point[`c_${id}`] = Math.round(Math.min((c.matched_skills || []).length / Math.max(maxMatched, 1) * 100, 100));
-        });
-        return point;
-    });
-
-    const selectedCandidates = selectedIds.map(id => pool.find(c => c.id === id)).filter(Boolean);
+    if (skillData.length === 0) return null;
 
     return (
         <div style={card({ padding: 18 })}>
-            {/* Header */}
             <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
-                    Candidate Comparison
+                    Skill Coverage Analysis
                 </div>
                 <div style={{ fontSize: 12, color: C.cardText, lineHeight: 1.6 }}>
-                    Select 2–6 candidates to compare across 5 dimensions on a radar chart. Default shows the top 3.
+                    Shows how many candidates match each required skill. Longer bars mean the skill is common in the talent pool; short bars reveal hard-to-find skills.
                 </div>
             </div>
 
-            {/* Selector chips */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
-                {pool.map(c => {
-                    const isSelected = selectedIds.includes(c.id);
-                    const colorIdx = selectedIds.indexOf(c.id);
-                    const col = colorIdx >= 0 ? COMPARE_COLORS[colorIdx % COMPARE_COLORS.length] : C.border;
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {skillData.slice(0, isMobile ? 10 : 15).map(({ skill, matched, coverage }) => {
+                    const barCol = coverage >= 70 ? C.green : coverage >= 40 ? C.blue : coverage >= 20 ? C.amber : "#e74c5e";
                     return (
-                        <button key={c.id} onClick={() => toggleCandidate(c.id)} style={{
-                            padding: "4px 11px", borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: "pointer",
-                            background: isSelected ? `${col}18` : C.inputBg,
-                            color: isSelected ? col : C.sub,
-                            border: `1.5px solid ${isSelected ? col : C.border}`,
-                            fontFamily: "inherit", transition: "all .15s",
-                            display: "flex", alignItems: "center", gap: 5,
-                        }}>
-                            {isSelected && <div style={{ width: 6, height: 6, borderRadius: "50%", background: col, flexShrink: 0 }} />}
-                            {c.name || `Candidate ${c.id}`}
-                        </button>
-                    );
-                })}
-            </div>
-
-            {/* Radar */}
-            <ResponsiveContainer width="100%" height={isMobile ? 270 : 340}>
-                <RadarChart data={radarData} outerRadius="62%" margin={{ top: 15, right: 40, bottom: 15, left: 40 }}>
-                    <PolarGrid stroke={C.border} strokeDasharray="3 3" />
-                    <PolarAngleAxis dataKey="axis" tick={{ fill: C.sub, fontSize: isMobile ? 10 : 12, fontWeight: 600 }} />
-                    {selectedCandidates.map((c, idx) => {
-                        const col = COMPARE_COLORS[idx % COMPARE_COLORS.length];
-                        return (
-                            <Radar key={c.id} name={c.name || `#${c.id}`} dataKey={`c_${c.id}`}
-                                stroke={col} fill={col} fillOpacity={0.18} strokeWidth={2}
-                                dot={{ fill: col, r: 3 }} />
-                        );
-                    })}
-                    <Tooltip
-                        contentStyle={{ background: C.drawerBg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 11, color: C.text }}
-                        labelStyle={{ color: C.sub, fontWeight: 700 }}
-                        formatter={(value, name) => [`${value}%`, name]}
-                    />
-                </RadarChart>
-            </ResponsiveContainer>
-
-            {/* Legend */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 14, justifyContent: "center", marginTop: 8 }}>
-                {selectedCandidates.map((c, idx) => {
-                    const col = COMPARE_COLORS[idx % COMPARE_COLORS.length];
-                    const fs = Math.round((c.finalScore || 0) * 100);
-                    return (
-                        <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
-                            <div style={{ width: 10, height: 10, borderRadius: 2, background: col, flexShrink: 0 }} />
-                            <span style={{ color: C.sub, fontWeight: 600 }}>{c.name || `Candidate ${c.id}`}</span>
-                            <span style={{ color: col, fontWeight: 700 }}>— {fs}%</span>
+                        <div key={skill} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ width: isMobile ? 90 : 130, fontSize: 11, fontWeight: 600, color: C.text, textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {skill}
+                            </div>
+                            <div style={{ flex: 1, height: 18, background: C.inputBg, borderRadius: 6, overflow: "hidden", position: "relative" }}>
+                                <div style={{ width: `${Math.max(coverage, 2)}%`, height: "100%", background: `${barCol}cc`, borderRadius: 6, transition: "width .4s ease" }} />
+                            </div>
+                            <div style={{ width: 60, fontSize: 11, fontWeight: 700, color: barCol, textAlign: "right", flexShrink: 0 }}>
+                                {matched}/{results.length}
+                                <span style={{ color: C.muted, fontWeight: 400, marginLeft: 3 }}>({coverage}%)</span>
+                            </div>
                         </div>
                     );
                 })}
             </div>
+
+            {skillData.length > (isMobile ? 10 : 15) && (
+                <div style={{ fontSize: 10, color: C.muted, marginTop: 8, textAlign: "center" }}>
+                    Showing top {isMobile ? 10 : 15} of {skillData.length} skills
+                </div>
+            )}
         </div>
     );
 };
@@ -1665,7 +1611,7 @@ const AnalyticsView = ({ results, isMobile }) => {
                     ].map(({ range, label, desc }) => {
                         const count = buckets[range] || 0;
                         const pct = results.length ? Math.round(count / results.length * 100) : 0;
-                        const col = range === "81–100" ? C.green : range === "61–80" ? C.blue : range === "41–60" ? C.teal : range === "21–40" ? C.amber : "#ef4444";
+                        const col = range === "81–100" ? "#4aba91" : range === "61–80" ? "#5b9bd5" : range === "41–60" ? "#d4a843" : range === "21–40" ? "#e8854a" : "#e74c5e";
                         const empty = count === 0;
                         return (
                             <div key={range} style={{ textAlign: "center", padding: "14px 8px", borderRadius: 12, background: empty ? `${C.muted}06` : `${col}08`, border: `1px solid ${empty ? C.border : `${col}25`}`, opacity: empty ? 0.4 : 1, transition: "opacity .2s" }}>
@@ -1701,9 +1647,9 @@ const AnalyticsView = ({ results, isMobile }) => {
                 </div>
             </div>
 
-            {/* ── Candidate Comparison (PUBG-style radar) ──────────────────── */}
+            {/* ── Skill Coverage Analysis ────────────────────────────────── */}
             {results.length >= 2 && (
-                <CandidateComparisonChart eligible={eligible} allCandidates={results} isMobile={isMobile} />
+                <SkillCoverageAnalysis results={results} isMobile={isMobile} />
             )}
 
         </div>
