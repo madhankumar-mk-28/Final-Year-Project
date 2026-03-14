@@ -90,6 +90,18 @@ DEGREE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ── Pre-computed skill lookup structures (built once at import time) ───────────
+# Sorted longest-first so multi-word phrases are matched before their sub-words.
+_SORTED_SKILLS = sorted(SKILLS_DB, key=len, reverse=True)
+
+# Pre-compiled word-boundary patterns for every single-word skill.
+# Phrase skills (containing spaces) use a plain `in` check instead.
+_SKILL_REGEXES: dict[str, re.Pattern[str]] = {
+    skill: re.compile(r"\b" + re.escape(skill) + r"\b")
+    for skill in SKILLS_DB
+    if " " not in skill
+}
+
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -211,20 +223,20 @@ def extract_skills(text: str) -> list:
     """
     Matches skills from SKILLS_DB against resume text.
     Multi-word skills checked first to avoid partial matches.
+    Uses pre-sorted skill list and pre-compiled regex patterns (built at import
+    time) so no sorting or regex compilation happens on each call.
     """
     text_lower = text.lower()
     found = set()
 
-    # Sort by length descending so multi-word skills match first
-    sorted_skills = sorted(SKILLS_DB, key=len, reverse=True)
-
-    for skill in sorted_skills:
-        # Use word boundary for single words, loose match for phrases
+    for skill in _SORTED_SKILLS:
+        # Use pre-compiled word-boundary pattern for single-word skills;
+        # plain substring check is sufficient for multi-word phrases.
         if " " in skill:
             if skill in text_lower:
                 found.add(skill)
         else:
-            if re.search(r"\b" + re.escape(skill) + r"\b", text_lower):
+            if _SKILL_REGEXES[skill].search(text_lower):
                 found.add(skill)
 
     return sorted(found)

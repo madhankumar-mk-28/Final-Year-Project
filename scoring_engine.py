@@ -13,6 +13,7 @@ Default weights:
 import logging
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 logger = logging.getLogger("scoring_engine")
 
@@ -67,12 +68,14 @@ SKILL_ALIASES = {
 }
 
 
+@lru_cache(maxsize=1024)
 def _normalise_skill_text(skill: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+#.\- ]+", " ", skill.lower())).strip()
 
 
-def _tokenise_skill(skill: str) -> set:
-    return {tok for tok in _normalise_skill_text(skill).split(" ") if tok}
+@lru_cache(maxsize=1024)
+def _tokenise_skill(skill: str) -> frozenset:
+    return frozenset(tok for tok in _normalise_skill_text(skill).split(" ") if tok)
 
 
 def _is_skill_match(req_lower: str, candidate_lower: set) -> bool:

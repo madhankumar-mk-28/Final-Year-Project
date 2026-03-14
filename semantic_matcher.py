@@ -158,6 +158,9 @@ def rank_resumes_by_similarity(
       • Full resume vs JD  — 40% weight (broad context)
       • Key sections vs JD — 60% weight (skills / experience are most relevant)
 
+    All resume chunks are encoded in a single batched model.encode() call for
+    maximum throughput on both CPU and GPU.
+
     Args:
         resume_texts:    dict of { filename: extracted_text }
         job_description: Job description string
@@ -171,22 +174,51 @@ def rank_resumes_by_similarity(
         len(resume_texts), model_name,
     )
 
+    model = _get_model(model_name)
+
     # Embed the job description once and reuse for every resume
     jd_emb = embed_job_description(job_description, model_name)
 
-    results = []
+    # ── Collect all chunks upfront so we can encode in one batch ─────────────
+    filenames:    list[str]                       = []
+    all_chunks:   list[str]                       = []   # flat list of every text chunk
+    chunk_spans:  list[tuple[int, int, int, int]] = []   # (full_start, full_end, key_start, key_end)
 
     for filename, text in resume_texts.items():
         clean_text = _preprocess(text)
 
-        # Score 1: full resume text
-        full_emb   = embed_text(clean_text, model_name)
-        full_score = cosine_similarity(full_emb, jd_emb)
+        full_chunks = _chunk_text(clean_text)
+        key_chunks  = _chunk_text(_extract_key_sections(clean_text))
 
-        # Score 2: key resume sections (skills, experience, projects)
-        key_text   = _extract_key_sections(clean_text)
-        key_emb    = embed_text(key_text, model_name)
-        key_score  = cosine_similarity(key_emb, jd_emb)
+        full_start = len(all_chunks)
+        all_chunks.extend(full_chunks)
+        full_end   = len(all_chunks)
+
+        key_start  = len(all_chunks)
+        all_chunks.extend(key_chunks)
+        key_end    = len(all_chunks)
+
+        filenames.append(filename)
+        chunk_spans.append((full_start, full_end, key_start, key_end))
+
+    # ── Single batched encode for all resumes ─────────────────────────────────
+    all_embeddings = model.encode(
+        all_chunks,
+        convert_to_numpy=True,
+        show_progress_bar=False,
+        normalize_embeddings=True,   # unit-length vectors — needed for cosine similarity
+        batch_size=64,
+    )
+
+    # ── Pool embeddings back per resume and compute scores ────────────────────
+    results = []
+
+    for filename, (full_start, full_end, key_start, key_end) in zip(filenames, chunk_spans):
+        full_emb   = np.max(all_embeddings[full_start:full_end], axis=0)
+        key_emb    = np.max(all_embeddings[key_start:key_end],  axis=0)
+
+        full_score = cosine_similarity(full_emb, jd_emb)
+        key_score  = cosine_similarity(key_emb,  jd_emb)
 
         # Weighted combination
         combined = float(np.clip(0.40 * full_score + 0.60 * key_score, 0.0, 1.0))

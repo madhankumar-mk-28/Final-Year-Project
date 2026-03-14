@@ -258,10 +258,11 @@ def screen():
         with open(RESULTS_FILE, "w") as f:
             json.dump(serialized, f, indent=2)
 
+        shortlisted = sum(1 for r in serialized if r["eligible"])
         logger.info(
             "[Pipeline] Done — %d ranked | %d shortlisted | model: %s",
             len(serialized),
-            sum(1 for r in serialized if r["eligible"]),
+            shortlisted,
             model_name,
         )
 
@@ -269,7 +270,7 @@ def screen():
             "message":     "Screening complete.",
             "model_used":  model_name,
             "total":       len(serialized),
-            "shortlisted": sum(1 for r in serialized if r["eligible"]),
+            "shortlisted": shortlisted,
             "results":     serialized,
         }), 200
 
