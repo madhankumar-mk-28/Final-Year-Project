@@ -381,10 +381,13 @@ def serve_react(path):
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+
     print("=" * 58)
     print("  ML-Based Resume Screening System — Flask API")
-    print("  http://localhost:5001")
+    print(f"  Running on port {port}")
     print(f"  Default model   : {VALID_MODELS['mpnet']}")
     print(f"  Available models: {', '.join(VALID_MODELS)}")
     print("=" * 58)
-    app.run(debug=True, port=5001)
+
+    app.run(host="0.0.0.0", port=port)
