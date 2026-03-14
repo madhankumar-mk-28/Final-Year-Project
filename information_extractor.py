@@ -82,6 +82,18 @@ SKILLS_DB = {
     "android", "ios", "flutter", "react native",
     "opencv", "image processing", "speech recognition",
     "data visualization", "etl", "web scraping", "selenium", "beautifulsoup",
+
+    # Databases / query operations
+    "crud", "stored procedures", "stored procedure", "itsm",
+    "it service management", "sql queries", "query optimization",
+    "database design", "database management",
+
+    # Soft skills
+    "time management", "written communication", "verbal communication",
+    "teamwork", "collaboration", "problem solving", "analytical skills",
+    "critical thinking", "communication", "leadership", "presentation",
+    "project management", "attention to detail", "multitasking",
+    "adaptability", "creativity", "innovation",
 }
 
 DEGREE_PATTERN = re.compile(

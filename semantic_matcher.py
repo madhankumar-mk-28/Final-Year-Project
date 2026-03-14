@@ -161,7 +161,7 @@ def rank_resumes_by_similarity(
     Args:
         resume_texts:    dict of { filename: extracted_text }
         job_description: Job description string
-        model_name:      One of MPNET_MODEL, BGE_MODEL, ARCTIC_MODEL
+        model_name:      One of MPNET_MODEL, MXBAI_MODEL, ARCTIC_MODEL
 
     Returns:
         List of { filename, similarity_score } sorted by score descending.

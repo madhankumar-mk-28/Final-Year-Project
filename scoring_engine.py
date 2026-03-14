@@ -64,6 +64,19 @@ SKILL_ALIASES = {
     "aws":                  ["aws", "azure", "gcp", "google cloud", "cloud"],
     "react":                ["react", "reactjs", "next.js", "nextjs"],
     "javascript":           ["javascript", "typescript", "js", "ts", "nodejs", "node"],
+    "data analytics":       ["data analytics", "data analysis", "analytics", "business intelligence", "bi", "tableau", "power bi"],
+    "itsm":                 ["itsm", "it service management", "itil", "service desk", "service management"],
+    "crud":                 ["crud", "database operations", "data manipulation"],
+    "stored procedures":    ["stored procedures", "stored procedure", "pl/sql", "t-sql", "tsql"],
+    "problem solving":      ["problem solving", "troubleshooting", "debugging", "root cause analysis"],
+    "teamwork":             ["teamwork", "team player", "collaboration", "cross-functional"],
+    "collaboration":        ["collaboration", "teamwork", "team player"],
+    "communication":        ["communication", "verbal communication", "written communication", "presentation"],
+    "verbal communication": ["verbal communication", "communication", "presentation"],
+    "written communication":["written communication", "communication", "documentation"],
+    "analytical skills":    ["analytical skills", "analytical thinking", "data analysis", "analysis"],
+    "critical thinking":    ["critical thinking", "analytical thinking", "problem solving"],
+    "time management":      ["time management", "prioritization", "deadline management"],
 }
 
 
