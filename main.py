@@ -13,11 +13,16 @@ import sys
 import json
 import csv
 import time
+from datetime import datetime, timezone
 
 from resume_parser       import load_resumes_from_folder
 from information_extractor import extract_all
-from semantic_matcher    import rank_resumes_by_similarity, rank_resumes_ensemble, compute_skill_semantic_matches
+from semantic_matcher    import (
+    rank_resumes_by_similarity, rank_resumes_ensemble,
+    compute_skill_semantic_matches, ENSEMBLE_WEIGHTS,
+)
 from scoring_engine      import ScoringConfig, score_candidates, print_results
+from metrics_store       import record_run
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -133,8 +138,23 @@ def run_pipeline(config_path: str = "config.json"):
     print()
 
     # ── Step 3: Ensemble semantic similarity (all 3 models) ───────────────
+    # Run each model individually so we capture per_model_similarities for
+    # metrics recording and Spearman rank-correlation analysis.
     print("[Step 3] Computing ensemble semantic similarity (all 3 models)...")
-    similarity_results = rank_resumes_ensemble(resume_texts, job_description)
+    per_model_similarities: dict[str, list] = {}
+    total_weight = sum(ENSEMBLE_WEIGHTS.values())
+    accumulated: dict[str, float] = {fname: 0.0 for fname in resume_texts}
+    for model_name, weight in ENSEMBLE_WEIGHTS.items():
+        per_model_similarities[model_name] = rank_resumes_by_similarity(
+            resume_texts, job_description, model_name=model_name
+        )
+        for r in per_model_similarities[model_name]:
+            accumulated[r["filename"]] += weight * r["similarity_score"]
+    similarity_results = [
+        {"filename": f, "similarity_score": round(min(max(s / total_weight, 0.0), 1.0), 4)}
+        for f, s in accumulated.items()
+    ]
+    similarity_results.sort(key=lambda x: x["similarity_score"], reverse=True)
     similarity_map = {r["filename"]: r["similarity_score"] for r in similarity_results}
 
     # ── Step 3b: Semantic skill matching ─────────────────────────────────
@@ -164,6 +184,33 @@ def run_pipeline(config_path: str = "config.json"):
 
     # ── Save CSV ──────────────────────────────────────────────────────────
     save_results_to_csv(results, output_csv)
+
+    # ── Record metrics ────────────────────────────────────────────────────
+    run_id = datetime.now(timezone.utc).isoformat()
+    final_scores_for_metrics = [
+        {
+            "rank":          i + 1,
+            "name":          r.get("name", "Unknown"),
+            "filename":      r.get("filename", ""),
+            "skillScore":    r.get("skill_score", 0.0),
+            "semanticScore": r.get("semantic_score", 0.0),
+            "finalScore":    r.get("final_score", 0.0),
+            "eligible":      r.get("eligible", False),
+        }
+        for i, r in enumerate(results)
+    ]
+    try:
+        record_run(
+            run_id=run_id,
+            model_key="ensemble",
+            job_description=job_description or "",
+            similarity_results=similarity_results,
+            per_model_similarities=per_model_similarities,
+            final_scores=final_scores_for_metrics,
+        )
+        print("[Metrics] Run recorded. Inspect with: python metrics_store.py")
+    except Exception as _me:
+        print(f"[Metrics] Warning: Could not record metrics: {_me}")
 
     elapsed = time.time() - start
     print(f"\n[Done] Pipeline completed in {elapsed:.1f}s")
