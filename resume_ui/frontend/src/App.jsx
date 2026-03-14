@@ -1337,6 +1337,21 @@ const JobConfigView = () => {
 };
 
 // ─── SKILL COVERAGE ANALYSIS ───────────────────────────────────────────────────
+const getScoreRangeColor = (range) => {
+    if (range === "81–100") return "#4aba91";
+    if (range === "61–80")  return "#5b9bd5";
+    if (range === "41–60")  return "#d4a843";
+    if (range === "21–40")  return "#e8854a";
+    return "#e74c5e";
+};
+
+const getCoverageColor = (pct) => {
+    if (pct >= 70) return C.green;
+    if (pct >= 40) return C.blue;
+    if (pct >= 20) return C.amber;
+    return "#e74c5e";
+};
+
 const SkillCoverageAnalysis = ({ results, isMobile }) => {
     const skillCount = {};
     const skillTotal = results.length || 1;
@@ -1368,7 +1383,7 @@ const SkillCoverageAnalysis = ({ results, isMobile }) => {
 
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {skillData.slice(0, isMobile ? 10 : 15).map(({ skill, matched, coverage }) => {
-                    const barCol = coverage >= 70 ? C.green : coverage >= 40 ? C.blue : coverage >= 20 ? C.amber : "#e74c5e";
+                    const barCol = getCoverageColor(coverage);
                     return (
                         <div key={skill} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                             <div style={{ width: isMobile ? 90 : 130, fontSize: 11, fontWeight: 600, color: C.text, textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1611,7 +1626,7 @@ const AnalyticsView = ({ results, isMobile }) => {
                     ].map(({ range, label, desc }) => {
                         const count = buckets[range] || 0;
                         const pct = results.length ? Math.round(count / results.length * 100) : 0;
-                        const col = range === "81–100" ? "#4aba91" : range === "61–80" ? "#5b9bd5" : range === "41–60" ? "#d4a843" : range === "21–40" ? "#e8854a" : "#e74c5e";
+                        const col = getScoreRangeColor(range);
                         const empty = count === 0;
                         return (
                             <div key={range} style={{ textAlign: "center", padding: "14px 8px", borderRadius: 12, background: empty ? `${C.muted}06` : `${col}08`, border: `1px solid ${empty ? C.border : `${col}25`}`, opacity: empty ? 0.4 : 1, transition: "opacity .2s" }}>

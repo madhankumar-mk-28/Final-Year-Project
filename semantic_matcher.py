@@ -126,7 +126,7 @@ def embed_text(text: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
     max_pool  = np.max(embeddings, axis=0)
     combined  = 0.5 * mean_pool + 0.5 * max_pool
 
-    # Re-normalise to unit length for cosine similarity
+    # Re-normalize to unit length for cosine similarity
     norm = np.linalg.norm(combined)
     if norm > 0:
         combined = combined / norm

@@ -320,8 +320,8 @@ def compare_candidates(profile_a: dict, profile_b: dict) -> dict:
         delta["skills"] = {"added": added, "removed": removed}
 
     # Education
-    edu_a = set((e.strip().lower()) for e in (profile_a.get("education") or []))
-    edu_b = set((e.strip().lower()) for e in (profile_b.get("education") or []))
+    edu_a = set(e.strip().lower() for e in (profile_a.get("education") or []))
+    edu_b = set(e.strip().lower() for e in (profile_b.get("education") or []))
     edu_added   = sorted(edu_b - edu_a)
     edu_removed = sorted(edu_a - edu_b)
     if edu_added or edu_removed:
@@ -749,6 +749,7 @@ def compare():
 
     delta = compare_candidates(profile_a, profile_b)
 
+    # score_delta: positive means candidate A scores higher than candidate B
     score_delta = {
         "skillScore":    round(cand_a.get("skillScore", 0) - cand_b.get("skillScore", 0), 4),
         "semanticScore": round(cand_a.get("semanticScore", 0) - cand_b.get("semanticScore", 0), 4),
