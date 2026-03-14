@@ -54,8 +54,8 @@ SKILL_ALIASES = {
     "scikit-learn":         ["scikit-learn", "sklearn", "machine learning"],
     "pytorch":              ["pytorch", "torch"],
     "tensorflow":           ["tensorflow", "tf", "keras"],
-    "python":               ["python"],
-    "sql":                  ["sql", "mysql", "postgresql", "postgres", "sqlite", "oracle", "database"],
+    "python":               ["python", "python3", "py", "django", "flask", "fastapi"],
+    "sql":                  ["sql", "mysql", "postgresql", "postgres", "sqlite", "oracle", "database", "mariadb", "tsql", "pl/sql"],
     "pandas":               ["pandas", "data analysis", "data analytics"],
     "numpy":                ["numpy", "scipy"],
     "flask":                ["flask", "fastapi", "django", "rest api", "restful"],
@@ -63,10 +63,10 @@ SKILL_ALIASES = {
     "docker":               ["docker", "kubernetes", "k8s", "containerization"],
     "aws":                  ["aws", "azure", "gcp", "google cloud", "cloud"],
     "react":                ["react", "reactjs", "next.js", "nextjs"],
-    "javascript":           ["javascript", "typescript", "js", "ts", "nodejs", "node"],
+    "javascript":           ["javascript", "typescript", "js", "ts", "nodejs", "node", "node.js", "express"],
     "data analytics":       ["data analytics", "data analysis", "analytics", "business intelligence", "bi", "tableau", "power bi"],
     "itsm":                 ["itsm", "it service management", "itil", "service desk", "service management"],
-    "crud":                 ["crud", "database operations", "data manipulation"],
+    "crud":                 ["crud", "database operations", "data manipulation", "database management"],
     "stored procedures":    ["stored procedures", "stored procedure", "pl/sql", "t-sql", "tsql"],
     "problem solving":      ["problem solving", "troubleshooting", "debugging", "root cause analysis"],
     "teamwork":             ["teamwork", "team player", "collaboration", "cross-functional"],
@@ -77,6 +77,23 @@ SKILL_ALIASES = {
     "analytical skills":    ["analytical skills", "analytical thinking", "data analysis", "analysis"],
     "critical thinking":    ["critical thinking", "analytical thinking", "problem solving"],
     "time management":      ["time management", "prioritization", "deadline management"],
+    # ── Extended aliases ──────────────────────────────────────────────────────
+    "adaptability":         ["adaptability", "flexibility", "versatility", "collaboration",
+                             "teamwork", "learning agility", "open to change"],
+    "database management":  ["database management", "sql", "mysql", "postgresql", "postgres",
+                             "mongodb", "oracle", "sqlite", "mariadb", "database design",
+                             "crud", "stored procedures", "dbms", "rdbms", "nosql"],
+    "database design":      ["database design", "database management", "schema design",
+                             "erd", "entity relationship", "normalization", "sql",
+                             "mysql", "postgresql", "data modeling"],
+    "bootstrap":            ["bootstrap", "css framework", "html", "css", "tailwind",
+                             "frontend", "ui framework", "responsive design"],
+    "c":                    ["c", "c programming", "c language", "c/c++"],
+    "java":                 ["java", "spring", "springboot", "spring boot", "j2ee",
+                             "jvm", "maven", "gradle"],
+    "mongodb":              ["mongodb", "nosql", "document database", "atlas", "mongoose"],
+    "mysql":                ["mysql", "sql", "rdbms", "mariadb", "database"],
+    "nodejs":               ["nodejs", "node", "node.js", "javascript", "express", "npm"],
 }
 
 
@@ -121,15 +138,21 @@ def _is_skill_match(req_lower: str, candidate_lower: set) -> bool:
     return False
 
 
-def _skill_score(candidate_skills: list, required_skills: list) -> tuple:
+def _skill_score(candidate_skills: list, required_skills: list, semantic_matches: set | None = None) -> tuple:
     """
     Match required skills against candidate skills using aliases.
+    Optionally also accepts `semantic_matches` — a set of required skill strings
+    that were already confirmed as matched via embedding similarity.
     Returns (score 0-1, matched list, missing list).
     """
     if not required_skills:
         return 1.0, [], []
 
     candidate_lower = {_normalise_skill_text(s) for s in candidate_skills if s}
+    # Normalise incoming semantic matches for safe comparison
+    sem_matched_norm = (
+        {_normalise_skill_text(s) for s in semantic_matches} if semantic_matches else set()
+    )
     matched = []
     missing = []
 
@@ -137,8 +160,11 @@ def _skill_score(candidate_skills: list, required_skills: list) -> tuple:
         req_lower = _normalise_skill_text(req)
         if _is_skill_match(req_lower, candidate_lower):
             matched.append(req)
-            continue
-        missing.append(req)
+        elif req_lower in sem_matched_norm:
+            # Semantic embedding match (near-synonym / related concept)
+            matched.append(req)
+        else:
+            missing.append(req)
 
     score = len(matched) / len(required_skills)
     return round(score, 4), matched, missing
@@ -176,6 +202,10 @@ def score_candidates(candidates: list, required_skills: list, config: ScoringCon
     Each candidate dict must have:
       { "filename", "info": {name, skills, experience_years, ...}, "semantic_score" }
 
+    Optional per-candidate key:
+      "semantic_skill_matches": set of required skill strings that were matched
+                                via embedding similarity (from semantic_matcher).
+
     Returns sorted list with scoring details.
     """
     logger.info("[scoring_engine] Scoring %d candidates | weights: skill=%.2f semantic=%.2f exp=%.2f",
@@ -189,12 +219,15 @@ def score_candidates(candidates: list, required_skills: list, config: ScoringCon
         semantic_score = min(max(c.get("semantic_score", 0.0), 0.0), 1.0)
         filename       = c.get("filename", "")
 
+        # Pre-computed semantic skill matches (may be absent for backward compat)
+        semantic_skill_matches = c.get("semantic_skill_matches", None)
+
         # Eligibility
         eligible, rejection_reason = is_eligible(info, config)
 
-        # Skill score with alias matching
+        # Skill score with alias matching + optional semantic matching
         skill_score, matched_skills, missing_skills = _skill_score(
-            info.get("skills", []), required_skills
+            info.get("skills", []), required_skills, semantic_skill_matches
         )
 
         # Experience score saturates after reaching the target + buffer.
