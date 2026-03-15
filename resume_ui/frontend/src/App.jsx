@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { DottedSurface } from "./components/DottedSurface";
+import { BarsSpinner } from "./components/ui/bars-spinner";
 import {
     LayoutDashboard, Briefcase, Users, BarChart2, Upload, X, Check, Plus,
     FileText, TrendingUp, Award, Mail, ChevronRight,
@@ -905,7 +906,7 @@ const ProcessingView = ({ config, onDone }) => {
                             <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 13px", borderRadius: 10, background: done ? `${C.green}08` : active ? `${modelInfo.color}0f` : C.inputBg, border: `1px solid ${done ? `${C.green}20` : active ? `${modelInfo.color}26` : C.border}`, transition: "all .3s" }}>
                                 <div style={{ width: 19, height: 19, borderRadius: "50%", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: done ? `${C.green}18` : active ? `${modelInfo.color}18` : "transparent", border: `1.5px solid ${done ? C.green : active ? modelInfo.color : C.muted}` }}>
                                     {done ? <Check size={9} color={C.green} />
-                                        : active ? <div style={{ width: 7, height: 7, borderRadius: "50%", border: `2px solid ${modelInfo.color}`, borderTopColor: "transparent", animation: "spin .7s linear infinite" }} />
+                                        : active ? <BarsSpinner size={13} color={modelInfo.color} />
                                             : <div style={{ width: 4, height: 4, borderRadius: "50%", background: C.muted }} />}
                                 </div>
                                 <div style={{ flex: 1 }}>
@@ -1533,7 +1534,15 @@ const AnalyticsView = ({ results, isMobile }) => {
                         {eligible.map((c, i) => {
                             const score = Math.round((c.finalScore || 0) * 100);
                             const medal = ["🥇", "🥈", "🥉"][i];
-                            const barColor = score >= 80 ? C.green : score >= 60 ? C.blue : score >= 40 ? C.teal : C.amber;
+                            const bp = score >= 80
+                                ? { color: "#4ade80", gradient: "linear-gradient(90deg, #22c55e, #4ade80)" }
+                                : score >= 60
+                                ? { color: "#818cf8", gradient: "linear-gradient(90deg, #6366f1, #a5b4fc)" }
+                                : score >= 40
+                                ? { color: "#2dd4bf", gradient: "linear-gradient(90deg, #14b8a6, #5eead4)" }
+                                : { color: "#fbbf24", gradient: "linear-gradient(90deg, #f59e0b, #fcd34d)" };
+                            const barColor = bp.color;
+                            const barGradient = bp.gradient;
                             const RC = {
                                 0: { bg: "rgba(255,215,0,.1)", border: "rgba(255,215,0,.35)", text: "#FFD700" },
                                 1: { bg: "rgba(192,192,192,.1)", border: "rgba(192,192,192,.35)", text: "#C0C0C0" },
@@ -1555,8 +1564,8 @@ const AnalyticsView = ({ results, isMobile }) => {
                                     {/* Name */}
                                     <div style={{ width: 90, fontSize: 12, color: C.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>{c.name || "?"}</div>
                                     {/* Progress bar */}
-                                    <div style={{ flex: 1, height: 6, background: `${barColor}20`, borderRadius: 3, overflow: "hidden", minWidth: 40 }}>
-                                        <div style={{ height: "100%", width: `${score}%`, background: barColor, borderRadius: 3, transition: "width .9s ease", boxShadow: `0 0 6px ${barColor}55` }} />
+                                    <div style={{ flex: 1, height: 6, background: `${barColor}25`, borderRadius: 3, overflow: "hidden", minWidth: 40 }}>
+                                        <div style={{ height: "100%", width: `${score}%`, background: barGradient, borderRadius: 3, transition: "width .9s ease", boxShadow: `0 0 8px ${barColor}70` }} />
                                     </div>
                                     {/* Score */}
                                     <div style={{ width: 38, fontSize: 12, fontWeight: 800, color: barColor, textAlign: "right", flexShrink: 0 }}>{score}%</div>
