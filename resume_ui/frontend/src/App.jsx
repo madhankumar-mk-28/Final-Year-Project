@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { DottedSurface } from "./components/DottedSurface";
 import {
     LayoutDashboard, Briefcase, Users, BarChart2, Upload, X, Check, Plus,
     FileText, TrendingUp, Award, Mail, ChevronRight,
@@ -1817,15 +1816,12 @@ export default function App() {
 
     return (
         <>
-            {/* ── Animated dotted-surface background ─────────────────────── */}
-            <DottedSurface dark={dark} />
-
             {/* ── Global CSS ─────────────────────────────────────────────── */}
             <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap');
         *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
-        html { font-size:16px; background:${C.bg}; }
-        body { background:transparent; font-family:'Plus Jakarta Sans',sans-serif; color:${C.text}; -webkit-font-smoothing:antialiased; font-weight:500; }
+        html { font-size:16px; }
+        body { background:${C.bg}; font-family:'Plus Jakarta Sans',sans-serif; color:${C.text}; -webkit-font-smoothing:antialiased; font-weight:500; }
         ::-webkit-scrollbar { width:4px; height:4px; }
         ::-webkit-scrollbar-track { background:transparent; }
         ::-webkit-scrollbar-thumb { background:${C.scrollThumb}; border-radius:2px; }
@@ -1865,7 +1861,7 @@ export default function App() {
             )}
 
             {/* ── Layout ─────────────────────────────────────────────────── */}
-            <div style={{ display: "flex", minHeight: "100vh", background: "transparent", color: C.text }}>
+            <div style={{ display: "flex", minHeight: "100vh", background: C.bg, color: C.text }}>
 
                 {/* Desktop sidebar */}
                 {!isMobile && (
