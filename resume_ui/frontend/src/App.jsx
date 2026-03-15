@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { DottedSurface } from "./components/DottedSurface";
 import { BarsSpinner } from "./components/ui/bars-spinner";
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./components/ui/radar-chart";
 import {
     LayoutDashboard, Briefcase, Users, BarChart2, Upload, X, Check, Plus,
     FileText, TrendingUp, Award, Mail, ChevronRight,
@@ -1433,6 +1434,9 @@ const AnalyticsView = ({ results, isMobile }) => {
     const avgSkill = eligible.length ? Math.round(eligible.reduce((a, c) => a + (c.skillScore || 0), 0) / eligible.length * 100) : 0;
     const avgSem = eligible.length ? Math.round(eligible.reduce((a, c) => a + (c.semanticScore || 0), 0) / eligible.length * 100) : 0;
 
+    // Radar chart config — color driven by current theme
+    const RADAR_CHART_CONFIG = { skill: { label: "Skill Score", color: C.chartSkill } };
+
     // Vertical score distribution — all candidates, sorted by final score
     const scoreDist = [...results]
         .sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0))
@@ -1587,13 +1591,17 @@ const AnalyticsView = ({ results, isMobile }) => {
                         <div style={{ textAlign: "center", marginBottom: 6 }}>
                             <span style={{ fontSize: 14, fontWeight: 800, color: C.blue, background: `${C.blue}12`, padding: "3px 14px", borderRadius: 20, border: `1px solid ${C.blue}30` }}>{top.name}</span>
                         </div>
-                        <ResponsiveContainer width="100%" height={240}>
+                        <ChartContainer
+                            config={RADAR_CHART_CONFIG}
+                            style={{ height: 240 }}
+                        >
                             <RadarChart data={topRadar} outerRadius="68%" margin={{ top: 10, right: 25, bottom: 10, left: 25 }}>
                                 <PolarGrid stroke={C.border} />
                                 <PolarAngleAxis dataKey="s" tick={{ fill: C.sub, fontSize: 10 }} />
-                                <Radar dataKey="v" stroke={C.chartSkill} fill={C.chartSkill} fillOpacity={0.18} strokeWidth={2.5} dot={{ fill: C.chartSkill, r: 3 }} />
+                                <ChartTooltip cursor={false} content={<ChartTooltipContent themeColors={C} />} />
+                                <Radar name="skill" dataKey="v" stroke={C.chartSkill} fill={C.chartSkill} fillOpacity={0.18} strokeWidth={2.5} dot={{ fill: C.chartSkill, r: 3 }} />
                             </RadarChart>
-                        </ResponsiveContainer>
+                        </ChartContainer>
                     </div>
 
                     {/* Score breakdown beside radar */}
