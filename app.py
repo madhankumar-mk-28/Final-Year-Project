@@ -43,7 +43,6 @@ from resume_parser         import load_resumes_from_folder
 from information_extractor import extract_all
 from semantic_matcher      import (
     rank_resumes_by_similarity,
-    rank_resumes_ensemble,
     compute_skill_semantic_matches,
     MPNET_MODEL, MXBAI_MODEL, ARCTIC_MODEL,
     ENSEMBLE_WEIGHTS,
@@ -228,8 +227,6 @@ def _merge_candidate_profiles(profile_a: dict, profile_b: dict) -> dict:
 
 def merge_duplicate_candidates(extracted: dict) -> dict:
     """Truth Engine: merge multiple PDFs for the same person (matched by email or phone)."""
-    email_map = {}
-    phone_map = {}
     groups = []
     assigned = set()
 
@@ -242,14 +239,12 @@ def merge_duplicate_candidates(extracted: dict) -> dict:
         group = [(fname_a, info_a)]
         assigned.add(fname_a)
         email_a = (info_a.get("email") or "").strip().lower()
-        phone_a = (info_a.get("phone") or "").strip()
 
         for j in range(i + 1, len(items)):
             fname_b, info_b = items[j]
             if fname_b in assigned:
                 continue
             email_b = (info_b.get("email") or "").strip().lower()
-            phone_b = (info_b.get("phone") or "").strip()
 
             match = False
             # Only merge on email — email is a reliable unique identifier.
