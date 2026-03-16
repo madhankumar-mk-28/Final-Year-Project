@@ -1,19 +1,24 @@
-flask==3.1.3
-flask-cors==6.0.2
-
-pdfplumber==0.11.9
-
-spacy==3.8.11
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
-
-sentence-transformers==5.2.2
-transformers==5.0.0
-
-scikit-learn==1.8.0
-numpy==2.3.5
-pandas==2.3.3
-
-torch==2.10.0+cpu
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-werkzeug==3.1.6
+# Web framework
+flask>=2.3,<4.0
+flask-cors>=4.0
+werkzeug>=2.3
+
+# PDF parsing
+pdfplumber>=0.10
+pymupdf>=1.23
+
+# NLP & ML
+spacy>=3.7
+sentence-transformers>=2.7
+transformers>=4.40
+torch>=2.1
+numpy>=1.26
+scikit-learn>=1.4
+
+# Utilities
+pandas>=2.1
+
+# spaCy English model (installs directly — no separate download step needed)
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

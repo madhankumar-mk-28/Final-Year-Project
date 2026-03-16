@@ -57,19 +57,22 @@ def _extract_pymupdf(pdf_path: str) -> str:
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """
-    Extract and clean all text from a PDF file.
-
-    Tries pdfplumber first. If the result is empty or very short,
-    falls back to PyMuPDF for better coverage on difficult PDFs.
-    """
+    """Extract and clean all text from a PDF, falling back to PyMuPDF if pdfplumber fails."""
     fname = os.path.basename(pdf_path)
+
+    if not os.path.isfile(pdf_path):
+        logger.error("[resume_parser] File not found: %s", pdf_path)
+        return ""
+
     text = ""
 
     # ── Primary: pdfplumber ───────────────────────────────────────────────────
     try:
         text = _extract_pdfplumber(pdf_path)
         logger.info("[resume_parser] pdfplumber → %s (%d chars)", fname, len(text))
+    except PermissionError as e:
+        logger.error("[resume_parser] Permission denied reading %s: %s", fname, e)
+        return ""
     except Exception as e:
         logger.warning("[resume_parser] pdfplumber failed for %s: %s", fname, e)
 
@@ -90,32 +93,30 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     return text
 
 
-def load_resumes_from_folder(folder_path: str) -> dict:
-    """
-    Load all PDFs from a folder.
-    Returns: { filename: text_content }
-    """
+def load_resumes_from_folder(folder_path: str) -> tuple[dict, list]:
+    """Load all PDFs from a folder; return ({filename: text}, [failed_filenames])."""
     if not os.path.isdir(folder_path):
         raise NotADirectoryError(f"Folder not found: {folder_path}")
 
-    pdf_files = sorted([
-        f for f in os.listdir(folder_path)
-        if f.lower().endswith(".pdf")
-    ])
-
+    pdf_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".pdf")])
     if not pdf_files:
         raise FileNotFoundError(f"No PDF files found in: {folder_path}")
 
     logger.info("[resume_parser] Parsing %d PDF(s) from %s", len(pdf_files), folder_path)
-    results = {}
+    results, failed = {}, []
     for fname in pdf_files:
         full_path = os.path.join(folder_path, fname)
-        text = extract_text_from_pdf(full_path)
+        try:
+            text = extract_text_from_pdf(full_path)
+        except Exception as e:
+            logger.error("[resume_parser] Exception parsing %s: %s", fname, e)
+            text = ""
         if text.strip():
             results[fname] = text
             logger.info("[resume_parser] ✓ Loaded: %s", fname)
         else:
+            failed.append(fname)
             logger.warning("[resume_parser] ✗ Empty/unreadable: %s", fname)
 
-    logger.info("[resume_parser] %d resume(s) loaded.\n", len(results))
-    return results
+    logger.info("[resume_parser] %d loaded, %d failed.\n", len(results), len(failed))
+    return results, failed
