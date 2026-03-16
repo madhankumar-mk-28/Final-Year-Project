@@ -1,18 +1,49 @@
-# Mac
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
 # Python
 __pycache__/
 *.pyc
+*.pyo
+.conda/
+.env
+venv/
+env/
 
-# Resume test data
-Resumes/
+# App generated files
 uploads/
-
-# Generated results
-results.csv
 last_results.json
+audit.jsonl
+metrics_log.jsonl
+metrics_log.jsonl
+results.csv
+embeddings_store.json
 
-# React
-resume_ui/frontend/node_modules/
-resume_ui/frontend/build/
+# Build output
+dist/
+dist-ssr/
+
+# HuggingFace model cache (large, re-downloads automatically)
+.cache/

@@ -37,7 +37,7 @@ SKILLS_DB = {
     "tensorflow", "pytorch", "keras", "scikit-learn", "sklearn",
     "xgboost", "lightgbm", "catboost", "hugging face", "huggingface",
     "sentence-transformers", "spacy", "nltk", "gensim",
-    "opencv", "pillow", "transformers", "bert", "gpt", "llm",
+    "pillow", "transformers", "bert", "gpt", "llm",
     "langchain", "llamaindex", "diffusers", "stable diffusion",
     "fastai", "jax", "flax",
 
@@ -81,11 +81,25 @@ SKILLS_DB = {
     "generative ai", "llms", "prompt engineering",
     "android", "ios", "flutter", "react native",
     "opencv", "image processing", "speech recognition",
-    "data visualization", "etl", "web scraping", "selenium", "beautifulsoup",
+    "data visualization", "etl", "web scraping", "selenium", "beautifulsoup","pyspark","airbyte","dbt","duckdb",
+    "vector database","pinecone","weaviate","faiss","milvus","prompt tuning","llama","mistral","vllm","ray","ray serve",
+    "prefect","kedro","mlflow","dvc"
+
+    # Databases / query operations
+    "crud", "stored procedures", "stored procedure", "itsm",
+    "it service management", "sql queries", "query optimization",
+    "database design", "database management",
+
+    # Soft skills
+    "time management", "written communication", "verbal communication",
+    "teamwork", "collaboration", "problem solving", "analytical skills",
+    "critical thinking", "communication", "leadership", "presentation",
+    "project management", "attention to detail", "multitasking",
+    "adaptability", "creativity", "innovation",
 }
 
 DEGREE_PATTERN = re.compile(
-    r"(b\.?sc|b\.?tech|b\.?e\.?|bachelor|m\.?sc|m\.?tech|m\.?e\.?|master|mba|ph\.?d|diploma)"
+    r"(b\.?sc|b\.?tech|b\.?e\.?|bca|bba|bachelor|m\.?sc|m\.?tech|m\.?e\.?|mca|mba|master|ph\.?d|diploma)"
     r"[\w\s,.()\-]*",
     re.IGNORECASE,
 )
@@ -94,7 +108,7 @@ DEGREE_PATTERN = re.compile(
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def extract_all(text: str, filename: str = "") -> dict:
-    """Extract all fields. Always uses filename for name if provided."""
+    """Extract all structured fields from resume text; uses filename for name if provided."""
     result = {
         "name":             name_from_filename(filename) if filename else "Unknown",
         "email":            extract_email(text),
@@ -112,21 +126,7 @@ def extract_all(text: str, filename: str = "") -> dict:
 
 
 def name_from_filename(filename: str) -> str:
-    """
-    Derive a clean person name from the PDF filename.
-    
-    Examples:
-        Abhiram_A.pdf                    → Abhiram A
-        Shanjiv New Resume Latest.pdf    → Shanjiv
-        deepak_kumaravel_Resume.pdf      → Deepak Kumaravel
-        Salman_Mubarak_Ali_Resume_Deloitte.pdf → Salman Mubarak Ali
-        SudharsanCN_Resume.pdf.pdf       → Sudharsan CN
-        HAMDAN RESUME-4.pdf              → Hamdan
-        saad.resume.pdf                  → Saad
-        MyCV.pdf                         → MyCV
-        resume final.pdf                 → (uses fallback = filename stem)
-        RenderCV_EngineeringResumes_Theme (1).pdf → (fallback)
-    """
+    """Derive a clean person name from the PDF filename (strips noise words, extensions, numbers)."""
     # Strip all extensions (.pdf.pdf too)
     base = filename
     while True:
@@ -181,13 +181,7 @@ def extract_email(text: str) -> str:
 # ── Phone ─────────────────────────────────────────────────────────────────────
 
 def extract_phone(text: str) -> str:
-    """
-    Extracts Indian mobile numbers and international numbers.
-    Handles formats:
-      +91 9876543210   |  +91-987-654-3210
-      9876543210       |  98765 43210
-      +1 (555) 123-4567
-    """
+    """Extract Indian mobile numbers and international numbers from resume text."""
     patterns = [
         r"\+91[\s\-]?[6-9]\d{9}",              # +91 Indian
         r"\+91[\s\-]?\d{3}[\s\-]?\d{3}[\s\-]?\d{4}",  # +91 with separators
@@ -208,10 +202,7 @@ def extract_phone(text: str) -> str:
 # ── Skills (improved: multi-word first, then single-word) ────────────────────
 
 def extract_skills(text: str) -> list:
-    """
-    Matches skills from SKILLS_DB against resume text.
-    Multi-word skills checked first to avoid partial matches.
-    """
+    """Match skills from SKILLS_DB against resume text (multi-word first, then single-word)."""
     text_lower = text.lower()
     found = set()
 
@@ -233,16 +224,19 @@ def extract_skills(text: str) -> list:
 # ── Experience ────────────────────────────────────────────────────────────────
 
 def extract_experience_years(text: str) -> float:
-    """Extract maximum years of experience mentioned."""
+    """Extract maximum years of experience mentioned in resume."""
     patterns = [
         r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?experience",
         r"experience\s*(?:of\s+)?(\d+(?:\.\d+)?)\s*\+?\s*years?",
         r"(\d+(?:\.\d+)?)\s*\+?\s*yrs?\s+(?:of\s+)?experience",
+        r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:professional\s+)?(?:work\s+)?experience",
+        r"worked\s+for\s+(\d+(?:\.\d+)?)\s*\+?\s*years?",
     ]
     all_matches = []
     for pat in patterns:
         all_matches += re.findall(pat, text, re.IGNORECASE)
 
+    # Freshers / students often have 0 experience — return 0.0 (not None)
     return max((float(y) for y in all_matches), default=0.0)
 
 

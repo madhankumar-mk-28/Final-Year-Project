@@ -1,34 +1,52 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import {
     LayoutDashboard, Briefcase, Users, BarChart2, Upload, X, Check, Plus,
-    FileText, TrendingUp, Award, Mail, GraduationCap, ChevronRight,
+    FileText, TrendingUp, Award, Mail, ChevronRight,
     Sparkles, Clock, Star, AlertCircle, CheckCircle, Zap, ArrowRight,
-    RefreshCw, Sun, Moon, Edit3, Save, Cpu, Activity, Target, Download,
+    RefreshCw, Sun, Moon, Edit3, Save, Activity, Target, Download,
     Menu, ChevronDown, Info, Phone,
 } from "lucide-react";
 import {
     BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-    RadarChart, PolarGrid, PolarAngleAxis, Radar, CartesianGrid, Cell,
+    RadarChart, PolarGrid, PolarAngleAxis, Radar, CartesianGrid,
 } from "recharts";
 
 // ─── THEMES ───────────────────────────────────────────────────────────────────
+// Palette: Tailwind CSS v3 tokens (industry standard — used by Vercel, Linear, etc.)
 const DARK = {
-    bg: "#07070f", surface: "rgba(255,255,255,0.03)", border: "rgba(255,255,255,0.07)",
-    text: "#e2e2f0", sub: "#6b6b8a", muted: "#3a3a52",
-    blue: "#818cf8", green: "#22c55e", amber: "#f59e0b", pink: "#f472b6", teal: "#34d399",
-    sidebarBg: "rgba(255,255,255,0.015)", topbarBg: "#07070f",
-    inputBg: "rgba(255,255,255,0.045)", cardText: "#c4c4d8",
-    drawerBg: "#0d0d1b", scrollThumb: "rgba(255,255,255,0.08)",
-    chartTooltip: "#0d0d1b", tableFocus: "rgba(129,140,248,0.05)",
+    // Zinc-950 base — the same near-black Vercel uses
+    bg: "#09090b", surface: "rgba(255,255,255,0.04)", border: "rgba(255,255,255,0.09)",
+    text: "#f4f4f5", sub: "#71717a", muted: "#52525b",
+    // Indigo-500 / Green-500 / Amber-500 / Pink-500 / Teal-500
+    blue: "#6263c6", green: "#22c55e", amber: "#f59e0b", pink: "#ec4899", teal: "#14b8a6",
+    sidebarBg: "rgba(255,255,255,0.02)", topbarBg: "rgba(9,9,11,0.90)",
+    inputBg: "rgba(255,255,255,0.05)", cardText: "#d4d4d8",
+    drawerBg: "#0f0f11", scrollThumb: "rgba(255,255,255,0.09)",
+    chartTooltip: "#0f0f11", tableFocus: "rgba(99,102,241,0.06)",
+    // Chart: Indigo-400 · Emerald-400 · Amber-400 — vibrant but not neon
+    chartSkill: "#818cf8", chartSemantic: "#34d399", chartFinal: "#fbbf24",
 };
 const LIGHT = {
-    bg: "#f1f3fa", surface: "#ffffff", border: "rgba(0,0,0,0.08)",
-    text: "#111827", sub: "#6b7280", muted: "#d1d5db",
-    blue: "#6366f1", green: "#16a34a", amber: "#d97706", pink: "#db2777", teal: "#0d9488",
-    sidebarBg: "#e8eaf4", topbarBg: "#ffffff",
-    inputBg: "rgba(0,0,0,0.04)", cardText: "#374151",
-    drawerBg: "#f8f9fc", scrollThumb: "rgba(0,0,0,0.1)",
-    chartTooltip: "#ffffff", tableFocus: "rgba(99,102,241,0.05)",
+    // Dimmer blue-grey base — noticeably muted, not blinding
+    bg: "#c8cdd5", surface: "#d2d7df", border: "rgba(0,0,0,0.11)",
+    // Softer text — readable but not pure black
+    text: "#1e2533", sub: "#374151", muted: "#5c6878",
+    // Mid-tone accents — visible on the dimmer bg without being harsh
+    blue: "#4338ca", green: "#166534", amber: "#a16207", pink: "#be185d", teal: "#0f766e",
+    sidebarBg: "#bcc2cb", topbarBg: "rgba(200,205,213,0.95)",
+    inputBg: "rgba(0,0,0,0.06)", cardText: "#2d3748",
+    drawerBg: "#c4c9d1", scrollThumb: "rgba(0,0,0,0.14)",
+    chartTooltip: "#e2e6ea", tableFocus: "rgba(67,56,202,0.06)",
+    chartSkill: "#4338ca", chartSemantic: "#166534", chartFinal: "#a16207",
+};
+
+// Helper: derive a short display name that avoids truncating on a 1-2 char prefix
+const shortDisplayName = (fullName, maxLen = 13) => {
+    const parts = (fullName || "?").split(" ").filter(Boolean);
+    let nm = parts[0] || "?";
+    let pi = 1;
+    while (nm.length <= 2 && pi < parts.length) { nm = parts.slice(0, pi + 1).join(" "); pi++; }
+    return nm.slice(0, maxLen);
 };
 
 // Module-level theme ref — updated at top of each App render
@@ -96,9 +114,10 @@ function useWindowWidth() {
 // ─── SHARED PRIMITIVES ────────────────────────────────────────────────────────
 const CircularRing = ({ value, size = 52, sw = 4.5, color }) => {
     const clr = color || C.blue;
+    const safeVal = Math.min(100, Math.max(0, value || 0));
     const r = (size - sw) / 2;
     const circ = r * 2 * Math.PI;
-    const offset = circ - (value / 100) * circ;
+    const offset = circ - (safeVal / 100) * circ;
     return (
         <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
             <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
@@ -108,7 +127,7 @@ const CircularRing = ({ value, size = 52, sw = 4.5, color }) => {
                     style={{ transition: "stroke-dashoffset 1s cubic-bezier(.4,0,.2,1)" }} />
             </svg>
             <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.22, fontWeight: 700, color: C.text }}>
-                {value}
+                {safeVal}
             </span>
         </div>
     );
@@ -344,11 +363,22 @@ const ProfileModal = ({ profile, onSave, onClose }) => {
 const Drawer = ({ candidate: c, onClose, isMobile }) => {
     if (!c) return null;
     const matched = c.matched_skills || [];
-    const allSkills = c.skills || [];
-    const missing = allSkills.filter(s => !matched.includes(s));
-    const radarData = matched.slice(0, 6).map((s, i) => ({
-        s: s.length > 7 ? s.slice(0, 6) + "…" : s,
-        v: Math.round(55 + ((i * 37 + 13) % 40)),
+    // Use server-computed missing_skills (required skills not found)
+    // Fall back to filtering c.skills only if missing_skills not present
+    // missing_skills from server = required skills the candidate lacks.
+    // Use it always when present (even if empty — means all required skills matched).
+    const missing = Array.isArray(c.missing_skills)
+        ? c.missing_skills
+        : (c.skills || []).filter(s => !matched.includes(s));
+    const skScore = Math.round((c.skillScore || 0) * 100);
+    const seScore = Math.round((c.semanticScore || 0) * 100);
+    const matchedSet = new Set(matched.map(x => x.toLowerCase()));
+    const radarSkills = [...new Set([...matched, ...missing])].slice(0, 6);
+    const radarData = radarSkills.map(s => ({
+        s,
+        v: matchedSet.has(s.toLowerCase())
+            ? Math.min(100, Math.round(skScore * 0.6 + seScore * 0.4))
+            : Math.min(35, Math.round(seScore * 0.35)),
     }));
 
     return (
@@ -398,7 +428,7 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
                 {/* Info rows */}
                 <div style={card({ padding: "4px 16px" })}>
                     {[
-                        { icon: Mail, label: "Email", value: c.email || "—", href: c.email ? `mailto:${c.email}` : null },
+                        { icon: Mail, label: "Email", value: c.email || "Not Found", href: c.email ? `mailto:${c.email}` : null },
                         { icon: Clock, label: "Experience", value: !c.experience ? "Fresher" : `${c.experience} yrs`, href: null },
                         { icon: Phone, label: "Phone", value: c.phone || c.phone_number || c.contact || c.mobile || c.contact_number || "Not found", href: (c.phone || c.phone_number || c.contact || c.mobile || c.contact_number) ? `tel:${(c.phone || c.phone_number || c.contact || c.mobile || c.contact_number || "").replace(/\s/g, "")}` : null },
                     ].map(({ icon: Icon, label, value, href }) => (
@@ -422,15 +452,24 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
                     </div>
                 </div>
 
-                {/* Radar chart */}
+                {/* Radar chart — analytics-style circular grid with hover tooltip */}
                 {radarData.length >= 3 && (
-                    <div style={card()}>
-                        <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>Skill Radar</div>
-                        <ResponsiveContainer width="100%" height={165}>
-                            <RadarChart data={radarData}>
-                                <PolarGrid stroke={C.border} />
-                                <PolarAngleAxis dataKey="s" tick={{ fill: C.sub, fontSize: 10 }} />
-                                <Radar dataKey="v" stroke={C.blue} fill={C.blue} fillOpacity={0.14} strokeWidth={2} />
+                    <div style={card({ padding: 16 })}>
+                        <div style={{ fontSize: 11, fontWeight: 800, color: C.text, marginBottom: 4 }}>Skill Radar</div>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 10 }}>Hover each point to see match score</div>
+                        <ResponsiveContainer width="100%" height={240}>
+                            <RadarChart data={radarData.map(d => ({ skill: d.s, score: d.v, fullMark: 100 }))} outerRadius="68%" margin={{ top:12, right:22, bottom:12, left:22 }}>
+                                <PolarGrid gridType="circle" stroke={C.border} />
+                                <PolarAngleAxis dataKey="skill" tick={{ fill: C.sub, fontSize: 10, fontWeight: 600 }} />
+                                <Tooltip
+                                    cursor={false}
+                                    contentStyle={{ background: C.drawerBg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, backdropFilter: "blur(12px)", boxShadow: "0 8px 24px rgba(0,0,0,.4)", color: C.text, padding: "8px 12px" }}
+                                    formatter={(value, name) => [`${value}%`, "Match Score"]}
+                                    labelStyle={{ color: C.blue, fontWeight: 700, marginBottom: 2 }}
+                                />
+                                <Radar dataKey="score" stroke={C.blue} strokeWidth={2.5} fill={C.blue} fillOpacity={0.2}
+                                    dot={{ fill: C.blue, r: 6, strokeWidth: 2, stroke: C.surface }}
+                                    activeDot={{ r: 8, fill: C.amber, stroke: C.text, strokeWidth: 2 }} />
                             </RadarChart>
                         </ResponsiveContainer>
                     </div>
@@ -458,7 +497,7 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
 };
 
 // ─── UPLOAD VIEW ──────────────────────────────────────────────────────────────
-const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile }) => {
+const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, backendOnline }) => {
     const [fileItems, setFileItems] = useState([]);
     const [isDragging, setIsDragging] = useState(false);
     const [toast, setToast] = useState(null);
@@ -528,7 +567,7 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile }) 
         e.preventDefault(); setIsDragging(false); addFiles(e.dataTransfer.files);
     }, [addFiles]);
 
-    const canStart = fileItems.length > 0 && jd.trim().length > 10;
+    const canStart = fileItems.length > 0 && jd.trim().length > 10 && backendOnline !== false;
     const activeM = MODELS[activeModel] || MODELS.mpnet;
 
     // Add skills — supports comma-separated and Enter
@@ -550,6 +589,14 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile }) 
                 <h2 style={{ fontSize: 21, fontWeight: 800, color: C.text, margin: 0 }}>Upload & Configure</h2>
                 <p style={{ color: C.sub, marginTop: 5, fontSize: 13 }}>Add PDF resumes and describe the role. The ML pipeline handles the rest.</p>
             </div>
+
+            {/* Backend offline banner */}
+            {backendOnline === false && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 16px", borderRadius: 12, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.25)", fontSize: 13, color: "#ef4444" }}>
+                    <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                    <span>Flask backend is not running. Start it with <code style={{ fontFamily: "monospace", background: "rgba(239,68,68,.12)", padding: "1px 6px", borderRadius: 4 }}>python app.py</code> before screening.</span>
+                </div>
+            )}
 
             {/* Drop zone */}
             <div onClick={() => fileRef.current.click()}
@@ -736,7 +783,9 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile }) 
                 ) : (
                     <div style={{ padding: "13px 20px", display: "flex", alignItems: "center", justifyContent: "center", gap: 9, fontSize: 12, color: C.sub }}>
                         <Info size={13} color={C.sub} style={{ flexShrink: 0 }} />
-                        {fileItems.length === 0
+                        {backendOnline === false
+                            ? "Start the Flask backend (python app.py) before screening."
+                            : fileItems.length === 0
                             ? "Upload at least one resume PDF to continue."
                             : "Add a job description (min 10 characters) to continue."}
                     </div>
@@ -754,6 +803,7 @@ const ProcessingView = ({ config, onDone }) => {
     const [step, setStep] = useState(0);
     const [status, setStatus] = useState("Connecting to backend…");
     const [error, setError] = useState(null);
+    const [warnings, setWarnings] = useState([]); // parse failures / merge info
     const doneRef = useRef(false);
     const ivRef = useRef(null);
 
@@ -771,6 +821,10 @@ const ProcessingView = ({ config, onDone }) => {
 
         const run = async () => {
             try {
+                // 0. Clear previous results and uploads so old cache never bleeds in
+                setStatus("Clearing previous session…");
+                await fetch(`${BASE}/api/clear`, { method: "POST" }).catch(() => {});
+
                 // 1. Upload PDFs
                 setStatus("Uploading PDFs to backend…");
                 const fd = new FormData();
@@ -800,13 +854,23 @@ const ProcessingView = ({ config, onDone }) => {
                 const data = await screenRes.json();
                 if (!screenRes.ok) throw new Error(data.error || "Screening failed");
 
+                // Surface parse warnings before handing off results
+                const warns = [];
+                if (data.parse_failures?.length) {
+                    warns.push(`${data.parse_failures.length} PDF(s) could not be parsed and were skipped: ${data.parse_failures.join(", ")}`);
+                }
+                if (data.merged_count > 0) {
+                    warns.push(`${data.merged_count} duplicate resume(s) were merged (same email/phone).`);
+                }
+                if (warns.length) setWarnings(warns);
+
                 // Done
                 clearInterval(ivRef.current);
                 doneRef.current = true;
                 setProgress(100);
                 setStep(PIPELINE_STEPS(config?.skillWeight || 55, MODELS[config?.model || "mpnet"]?.name || "MPNet").length - 1);
                 setStatus("Complete!");
-                setTimeout(() => onDone(data.results || []), 700);
+                setTimeout(() => onDone(data.results || []), warns.length ? 3000 : 700);
 
             } catch (err) {
                 clearInterval(ivRef.current);
@@ -816,6 +880,7 @@ const ProcessingView = ({ config, onDone }) => {
 
         run();
         return () => clearInterval(ivRef.current);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const pct = Math.round(progress);
@@ -852,11 +917,11 @@ const ProcessingView = ({ config, onDone }) => {
                 <div style={card({ display: "flex", flexDirection: "column", alignItems: "center", gap: 18, marginBottom: 12 })}>
                     <div style={{ position: "relative", width: 112, height: 112 }}>
                         <svg width={112} height={112} style={{ transform: "rotate(-90deg)" }}>
-                            <circle cx={56} cy={56} r={48} fill="none" stroke={`${modelInfo.color}15`} strokeWidth={8} />
+                            <circle cx={56} cy={56} r={48} fill="none" stroke={`${modelInfo.color}18`} strokeWidth={8} />
                             <circle cx={56} cy={56} r={48} fill="none" stroke={modelInfo.color} strokeWidth={8} strokeLinecap="round"
                                 strokeDasharray={2 * Math.PI * 48}
                                 strokeDashoffset={2 * Math.PI * 48 * (1 - progress / 100)}
-                                style={{ transition: "stroke-dashoffset .12s linear", filter: `drop-shadow(0 0 10px ${modelInfo.color}80)` }}
+                                style={{ transition: "stroke-dashoffset .12s linear", filter: `drop-shadow(0 0 5px ${modelInfo.color}99)` }}
                             />
                         </svg>
                         <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1 }}>
@@ -875,6 +940,18 @@ const ProcessingView = ({ config, onDone }) => {
                         </div>
                     </div>
                 </div>
+
+                {/* Parse warnings — shown when some PDFs were skipped or merged */}
+                {warnings.length > 0 && (
+                    <div style={{ marginBottom: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                        {warnings.map((w, i) => (
+                            <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "10px 14px", borderRadius: 10, background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.25)", fontSize: 12, color: "#f59e0b", lineHeight: 1.5 }}>
+                                <AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+                                {w}
+                            </div>
+                        ))}
+                    </div>
+                )}
 
                 {/* Pipeline steps */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
@@ -909,7 +986,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
             <EmptyState icon={LayoutDashboard} title="No results yet"
                 sub="Upload resumes and run the ML screening pipeline to see ranked candidates here."
                 action={
-                    <button onClick={() => onNav("upload")} style={{ padding: "9px 20px", borderRadius: 10, border: "none", background: `linear-gradient(135deg,${C.blue},#6366f1)`, color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 7 }}>
+                    <button onClick={() => onNav("upload")} style={{ padding:"9px 20px", borderRadius:10, border:"none", background:`linear-gradient(135deg,${C.blue},#6366f1)`, color:"#fff", cursor:"pointer", fontSize:13, fontWeight:700, fontFamily:"inherit", display:"flex", alignItems:"center", gap:7 }}>
                         <Upload size={13} /> Upload Resumes
                     </button>
                 }
@@ -917,136 +994,167 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
         );
     }
 
-    const eligible = results.filter(c => c.eligible);
-    const top = eligible[0] || results[0];
-    const avgScore = eligible.length ? Math.round(eligible.reduce((a, c) => a + (c.finalScore || 0), 0) / eligible.length * 100) : 0;
-    const scoreDist = eligible.slice(0, 8).map(c => ({ name: (c.name || "?").split(" ")[0].slice(0, 9), Skill: Math.round((c.skillScore || 0) * 100), Semantic: Math.round((c.semanticScore || 0) * 100), Final: Math.round((c.finalScore || 0) * 100) }));
-    const cols4 = isMobile ? "1fr 1fr" : "repeat(4,1fr)";
-    const cols2 = isMobile ? "1fr" : "1fr 1.65fr";
+    const eligible  = results.filter(c => c.eligible);
+    const rejected  = results.filter(c => !c.eligible);
+    const top       = eligible[0] || results[0];
+    const avgScore  = eligible.length ? Math.round(eligible.reduce((a,c) => a+(c.finalScore||0),0)/eligible.length*100) : 0;
+    const passRate  = results.length ? Math.round(eligible.length/results.length*100) : 0;
+    const topScore  = Math.round((top.finalScore||0)*100);
+    const TT = { background:"rgba(9,9,11,.96)", border:`1px solid ${C.border}`, borderRadius:10, fontSize:11, color:C.text, backdropFilter:"blur(12px)", boxShadow:"0 8px 24px rgba(0,0,0,.4)" };
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
 
-            {/* ── Stats row ───────────────────────────────────────────────── */}
-            <div style={{ display: "grid", gridTemplateColumns: cols4, gap: 12 }}>
+            {/* KPI strip — liquid glass StatPill */}
+            <div style={{ display:"grid", gridTemplateColumns: isMobile?"1fr 1fr":"repeat(4,1fr)", gap:10 }}>
                 {[
-                    { icon: FileText, label: "Screened", value: results.length, sub: "Resumes processed", color: C.blue },
-                    { icon: Award, label: "Shortlisted", value: eligible.length, sub: "Eligible candidates", color: C.green },
-                    { icon: TrendingUp, label: "Avg Score", value: `${avgScore}%`, sub: "Across eligible", color: C.amber },
-                    { icon: Star, label: "Top Score", value: `${Math.round((top.finalScore || 0) * 100)}%`, sub: top.name || "—", color: C.pink },
-                ].map(({ icon: Icon, label, value, sub, color }) => (
-                    <div key={label} style={card({ display: "flex", gap: 11, alignItems: "flex-start", padding: 16 })}>
-                        <div style={{ width: 36, height: 36, borderRadius: 9, background: `${color}18`, border: `1px solid ${color}25`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                            <Icon size={15} color={color} />
+                    { icon:FileText,   label:"Screened",    value:results.length,  color:C.blue,  sub:"resumes processed"  },
+                    { icon:Award,      label:"Shortlisted", value:eligible.length, color:C.green, sub:"eligible candidates" },
+                    { icon:TrendingUp, label:"Avg Score",   value:`${avgScore}%`,  color:C.amber, sub:"across shortlisted"  },
+                    { icon:Star,       label:"Pass Rate",   value:`${passRate}%`,  color:C.teal,  sub:"of total pool"       },
+                ].map(({ icon:Icon, label, value, sub, color }) => (
+                    <div key={label} style={{ padding:"14px 16px", borderRadius:14, background:C.surface, border:`1px solid ${C.border}`, position:"relative", overflow:"hidden",
+                        transition:"background .15s, border-color .15s" }}
+                        onMouseEnter={e=>{ e.currentTarget.style.background=`${color}08`; e.currentTarget.style.borderColor=`${color}28`; }}
+                        onMouseLeave={e=>{ e.currentTarget.style.background=C.surface; e.currentTarget.style.borderColor=C.border; }}>
+                        <div style={{ position:"absolute", top:0, left:"20%", right:"20%", height:1, background:`linear-gradient(90deg,transparent,${color}44,transparent)` }} />
+                        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                            <div style={{ width:30, height:30, borderRadius:8, background:`${color}12`, border:`1px solid ${color}20`, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                                <Icon size={13} color={color} />
+                            </div>
+                            <span style={{ fontSize:10, color:C.sub, fontWeight:600 }}>{label}</span>
                         </div>
-                        <div style={{ minWidth: 0 }}>
-                            <div style={{ fontSize: 11, color: C.sub, marginBottom: 1 }}>{label}</div>
-                            <div style={{ fontSize: 20, fontWeight: 800, color: C.text, lineHeight: 1.1 }}>{value}</div>
-                            <div style={{ fontSize: 10, color: C.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>
-                        </div>
+                        <div style={{ fontSize:22, fontWeight:900, color, lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{value}</div>
+                        <div style={{ fontSize:9, color:C.muted, marginTop:3 }}>{sub}</div>
                     </div>
                 ))}
             </div>
 
-            {/* ── Gauge + bar chart ──────────────────────────────────────── */}
+            {/* Top candidate + score distribution */}
             {eligible.length > 0 && (
-                <div style={{ display: "grid", gridTemplateColumns: cols2, gap: 12 }}>
-                    <div style={card({ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 18 })}>
-                        <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>Top Candidate</div>
-                        <GaugeArc value={Math.round((top.finalScore || 0) * 100)} />
-                        <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginTop: 4 }}>{top.name}</div>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center", marginTop: 9 }}>
-                            {(top.matched_skills || []).slice(0, 4).map(s => <SkillChip key={s} label={s} matched />)}
-                        </div>
-                    </div>
-                    <div style={card({ padding: 18 })}>
-                        {/* Header row */}
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                            <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em" }}>Score Distribution</div>
-                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                                <div style={{ fontSize: 10, color: C.muted }}>Top {scoreDist.length} candidates</div>
-                                <button onClick={() => onNav("analytics")} style={{ fontSize: 10, color: C.blue, background: `${C.blue}12`, border: `1px solid ${C.blue}25`, borderRadius: 8, padding: "2px 9px", cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
-                                    More →
-                                </button>
+                <div style={{ display:"grid", gridTemplateColumns: isMobile?"1fr":"360px 1fr", gap:14, alignItems:"stretch" }}>
+
+                    {/* Top candidate card */}
+                    <FieldCard label="Top Candidate" dot={C.amber}>
+                        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", paddingTop:4 }}>
+                            <div style={{ position:"relative", marginBottom:14 }}>
+                                <GaugeArc value={topScore} />
+                                <div style={{ marginTop:2, fontSize:14, fontWeight:800, color:C.text }}>{top.name}</div>
+                                <div style={{ fontSize:10, color:C.muted, marginTop:2 }}>🥇 Rank #1</div>
                             </div>
-                        </div>
-                        <ResponsiveContainer width="100%" height={210}>
-                            <BarChart data={scoreDist} barSize={8} barGap={2}
-                                margin={{ top: 4, right: 4, bottom: 8, left: 4 }}>
-                                <XAxis dataKey="name"
-                                    tick={{ fill: C.sub, fontSize: 9 }}
-                                    axisLine={false} tickLine={false}
-                                    interval={0} />
-                                <YAxis hide domain={[0, 100]} />
-                                <Tooltip
-                                    cursor={{ fill: "rgba(255,255,255,0.04)", radius: 4 }}
-                                    contentStyle={{ background: "rgba(10,10,22,0.92)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, fontSize: 11, backdropFilter: "blur(10px)", boxShadow: "0 8px 32px rgba(0,0,0,.55)", color: "#e2e2f0" }}
-                                    labelStyle={{ color: "#a0a0c0", fontWeight: 700 }} />
-                                <Bar dataKey="Skill" fill={C.blue} radius={[3, 3, 0, 0]} />
-                                <Bar dataKey="Semantic" fill={C.teal} radius={[3, 3, 0, 0]} />
-                                <Bar dataKey="Final" fill={C.amber} radius={[3, 3, 0, 0]} />
-                            </BarChart>
-                        </ResponsiveContainer>
-                        <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 4 }}>
-                            {[["Skill", C.blue], ["Semantic", C.teal], ["Final", C.amber]].map(([l, c]) => (
-                                <div key={l} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: C.sub }}>
-                                    <div style={{ width: 7, height: 7, borderRadius: 2, background: c }} />{l}
+                            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, width:"100%", marginBottom:12 }}>
+                                {[["Skill",Math.round((top.skillScore||0)*100),C.blue],["Semantic",Math.round((top.semanticScore||0)*100),C.teal]].map(([l,v,col])=>(
+                                    <div key={l} style={{ padding:"8px 10px", borderRadius:10, background:`${col}08`, border:`1px solid ${col}16`, textAlign:"center" }}>
+                                        <div style={{ fontSize:14, fontWeight:900, color:col }}>{v}%</div>
+                                        <div style={{ fontSize:9, color:C.muted, marginTop:1 }}>{l}</div>
+                                    </div>
+                                ))}
+                            </div>
+                            {(top.matched_skills||[]).length>0 && (
+                                <div style={{ display:"flex", gap:4, overflowX:"auto", scrollbarWidth:"none", width:"100%", justifyContent:"center", flexWrap:"wrap" }}>
+                                    {(top.matched_skills||[]).slice(0,5).map(s=><SkillChip key={s} label={s} matched />)}
                                 </div>
+                            )}
+                        </div>
+                    </FieldCard>
+
+                    {/* Score distribution — horizontal glass bars */}
+                    <FieldCard label="Score Distribution" dot={C.blue}>
+                        <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:10 }}>
+                            <button onClick={() => onNav("analytics")} style={{ fontSize:10, color:C.blue, background:`${C.blue}10`, border:`1px solid ${C.blue}22`, borderRadius:7, padding:"3px 10px", cursor:"pointer", fontFamily:"inherit", fontWeight:600 }}>
+                                Full Analytics →
+                            </button>
+                        </div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                            {[...results].sort((a,b)=>(b.finalScore||0)-(a.finalScore||0)).slice(0,10).map((c,i)=>{
+                                const fs = Math.round((c.finalScore||0)*100);
+                                const col = fs>=70?C.green:fs>=50?C.blue:C.amber;
+                                const medals = ["🥇","🥈","🥉"];
+                                return (
+                                    <div key={c.id} style={{ display:"flex", alignItems:"center", gap:9 }}>
+                                        <div style={{ width:20, textAlign:"center", flexShrink:0, fontSize:i<3?12:9, color:C.muted, lineHeight:1 }}>
+                                            {i<3?medals[i]:i+1}
+                                        </div>
+                                        <div style={{ width:110, fontSize:11, color:C.text, fontWeight:500, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flexShrink:0 }}>{c.name}</div>
+                                        <div style={{ flex:1, height:18, borderRadius:6, overflow:"hidden", background:C.inputBg, border:`1px solid ${C.border}`, backdropFilter:"blur(6px)", position:"relative" }}>
+                                            <div style={{ position:"absolute", top:0, left:0, bottom:0, width:`${Math.max(fs,1)}%`, background:`linear-gradient(90deg,${col}77,${col}cc)`, borderRadius:"6px 0 0 6px", transition:"width .8s cubic-bezier(.4,0,.2,1)" }}>
+                                                <div style={{ position:"absolute", top:0, left:0, right:0, height:"42%", background:"linear-gradient(180deg,rgba(255,255,255,0.16),rgba(255,255,255,0))", borderRadius:"6px 0 0 0" }} />
+                                            </div>
+                                            <div style={{ position:"relative", zIndex:1, height:"100%", display:"flex", alignItems:"center", paddingLeft:8 }}>
+                                                <span style={{ fontSize:9, fontWeight:700, color:C.text, textShadow:"none" }}>{fs}%</span>
+                                            </div>
+                                        </div>
+                                        <div style={{ width:6, height:6, borderRadius:"50%", flexShrink:0, background:c.eligible?C.green:"#ef4444", opacity:.7 }} />
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div style={{ display:"flex", gap:14, marginTop:12, paddingTop:10, borderTop:`1px solid ${C.border}` }}>
+                            {[["● Shortlisted",C.green],["● Rejected","#ef4444"]].map(([l,c])=>(
+                                <div key={l} style={{ fontSize:9, color:C.muted }}><span style={{color:c}}>{l.slice(0,1)}</span>{l.slice(1)}</div>
                             ))}
                         </div>
-                    </div>
+                    </FieldCard>
                 </div>
             )}
 
-            {/* ── Quick Actions — between scores and About panel ──────── */}
-            <div style={card({ padding: 16 })}>
-                <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 11 }}>Quick Actions</div>
-                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: 9 }}>
+            {/* Quick actions — glass pill row */}
+            <div style={{ borderRadius:16, border:`1px solid ${C.border}`, background:C.surface, backdropFilter:"blur(14px)", padding:"14px 18px" }}>
+                <div style={{ fontSize:11, fontWeight:700, color:C.sub, marginBottom:12 }}>Quick Actions</div>
+                <div style={{ display:"grid", gridTemplateColumns: isMobile?"1fr 1fr":"repeat(4,1fr)", gap:8 }}>
                     {[
-                        { label: "View Rankings", icon: Users, nav: "candidates", color: C.blue },
-                        { label: "Analytics", icon: BarChart2, nav: "analytics", color: C.teal },
-                        { label: "Job Config", icon: Briefcase, nav: "config", color: C.amber },
-                        { label: "New Screening", icon: RefreshCw, nav: "upload", color: C.pink },
-                    ].map(({ label, icon: Icon, nav, color }) => (
-                        <button key={nav} onClick={() => onNav(nav)} style={{ padding: "10px 11px", borderRadius: 10, background: `${color}0e`, border: `1px solid ${color}20`, color, fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, transition: "all .15s", fontFamily: "inherit" }}>
-                            <Icon size={12} /> {label}
+                        { label:"View Rankings", icon:Users,     nav:"candidates", color:C.blue  },
+                        { label:"Analytics",     icon:BarChart2, nav:"analytics",  color:C.teal  },
+                        { label:"Job Config",    icon:Briefcase, nav:"config",     color:C.amber },
+                        { label:"New Screening", icon:RefreshCw, nav:"upload",     color:C.pink  },
+                    ].map(({ label, icon:Icon, nav:n, color }) => (
+                        <button key={n} onClick={() => onNav(n)} style={{
+                            padding:"11px 14px", borderRadius:12, border:`1px solid ${color}22`,
+                            background:`${color}08`, color, fontSize:12, fontWeight:600,
+                            cursor:"pointer", display:"flex", alignItems:"center", gap:7,
+                            fontFamily:"inherit", transition:"all .15s",
+                        }}
+                            onMouseEnter={e=>{ e.currentTarget.style.background=`${color}14`; e.currentTarget.style.borderColor=`${color}38`; }}
+                            onMouseLeave={e=>{ e.currentTarget.style.background=`${color}08`; e.currentTarget.style.borderColor=`${color}22`; }}>
+                            <Icon size={13} /> {label}
                         </button>
                     ))}
                 </div>
             </div>
 
-            {/* ── About this System / Developer panel ───────────────────── */}
-            <div style={card({ padding: 22, background: `linear-gradient(135deg,rgba(129,140,248,.06),rgba(52,211,153,.04))`, borderColor: `${C.blue}25` })}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
-                    <div style={{ width: 38, height: 38, borderRadius: 10, background: `linear-gradient(135deg,${C.blue},#a78bfa)`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 4px 14px ${C.blue}44` }}>
+            {/* About / ML models panel */}
+            <FieldCard label="About This System" dot={C.blue}>
+                <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+                    <div style={{ width:38, height:38, borderRadius:10, background:`linear-gradient(135deg,${C.blue},#a78bfa)`, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
                         <Sparkles size={16} color="#fff" />
                     </div>
                     <div>
-                        <div style={{ fontSize: 15, fontWeight: 800, color: C.text }}>ML-Based Resume Screening System</div>
-                        <div style={{ fontSize: 11, color: C.sub }}>Developed by <span style={{ color: C.blue, fontWeight: 700 }}>Madhan Kumar</span> · B.Sc Computer Science Final Year Project</div>
+                        <div style={{ fontSize:14, fontWeight:800, color:C.text }}>ML-Based Resume Screening System</div>
+                        <div style={{ fontSize:11, color:C.sub }}>By <span style={{color:C.blue,fontWeight:700}}>Madhan Kumar</span> · B.Sc Computer Science Final Year Project</div>
                     </div>
                 </div>
-                <p style={{ fontSize: 13, color: C.cardText, lineHeight: 1.7, marginBottom: 18 }}>
-                    This system uses <strong style={{ color: C.blue }}>transformer-based sentence embedding models</strong> to semantically match resumes against job descriptions — going far beyond simple keyword matching. Each resume is converted into a high-dimensional vector using the selected model, and <strong style={{ color: C.teal }}>cosine similarity</strong> is computed against the job description embedding. Combined with a skill-coverage score, candidates are ranked using a <strong style={{ color: C.amber }}>configurable weighted formula</strong> — the exact skill vs. semantic split is set by you using the Skill Weight slider in the Upload tab.
+                <p style={{ fontSize:12, color:C.cardText, lineHeight:1.7, marginBottom:16 }}>
+                    Uses <strong style={{color:C.blue}}>transformer sentence embeddings</strong> to semantically match resumes to job descriptions — beyond keyword matching. <strong style={{color:C.teal}}>Cosine similarity</strong> is computed between resume and JD vectors, combined with skill coverage into a <strong style={{color:C.amber}}>configurable weighted score</strong>.
                 </p>
-                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: 11 }}>
+                <div style={{ display:"grid", gridTemplateColumns: isMobile?"1fr":"repeat(3,1fr)", gap:10 }}>
                     {Object.values(MODELS).map(m => (
-                        <div key={m.key} style={{ padding: "13px 15px", borderRadius: 12, background: `${m.color}08`, border: `1px solid ${m.color}${activeModel === m.key ? "50" : "20"}`, position: "relative" }}>
-                            {activeModel === m.key && (
-                                <div style={{ position: "absolute", top: 9, right: 9, padding: "1px 7px", borderRadius: 10, fontSize: 9, fontWeight: 700, background: `${m.color}25`, color: m.color }}>● Active</div>
+                        <div key={m.key} style={{ padding:"13px 14px", borderRadius:12, background:`${m.color}07`, border:`1px solid ${m.color}${activeModel===m.key?"40":"18"}`, position:"relative", transition:"border-color .15s" }}
+                            onMouseEnter={e=>e.currentTarget.style.borderColor=`${m.color}38`}
+                            onMouseLeave={e=>e.currentTarget.style.borderColor=`${m.color}${activeModel===m.key?"40":"18"}`}>
+                            {activeModel===m.key && (
+                                <div style={{ position:"absolute", top:8, right:8, padding:"1px 7px", borderRadius:10, fontSize:9, fontWeight:700, background:`${m.color}20`, color:m.color }}>● Active</div>
                             )}
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                                <div style={{ width: 8, height: 8, borderRadius: "50%", background: m.color, boxShadow: `0 0 6px ${m.color}` }} />
-                                <span style={{ fontSize: 13, fontWeight: 800, color: C.text }}>{m.name}</span>
-                                <span style={{ padding: "1px 7px", borderRadius: 10, fontSize: 9, fontWeight: 700, background: `${m.color}18`, color: m.color }}>{m.badge}</span>
+                            <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
+                                <div style={{ width:7, height:7, borderRadius:"50%", background:m.color, flexShrink:0 }} />
+                                <span style={{ fontSize:12, fontWeight:800, color:C.text }}>{m.name}</span>
+                                <span style={{ fontSize:8, padding:"1px 6px", borderRadius:10, fontWeight:700, background:`${m.color}16`, color:m.color }}>{m.badge}</span>
                             </div>
-                            <div style={{ fontSize: 10, fontFamily: "monospace", color: C.sub, marginBottom: 5, wordBreak: "break-all" }}>{m.short}</div>
-                            <div style={{ fontSize: 11, color: C.sub, lineHeight: 1.5 }}>{m.desc}</div>
-                            <div style={{ fontSize: 10, color: C.muted, marginTop: 4, fontStyle: "italic" }}>{m.detail}</div>
+                            <div style={{ fontSize:9, fontFamily:"monospace", color:C.muted, marginBottom:5, wordBreak:"break-all" }}>{m.short}</div>
+                            <div style={{ fontSize:10, color:C.sub, lineHeight:1.5 }}>{m.desc}</div>
                         </div>
                     ))}
                 </div>
-            </div>
+            </FieldCard>
 
         </div>
     );
@@ -1155,7 +1263,7 @@ const CandidatesView = ({ results, onNav, isMobile }) => {
                                             </div>
                                             <div>
                                                 <div style={{ fontSize: 13, fontWeight: 600, color: C.text, whiteSpace: "nowrap" }}>{c.name || "Unknown"}</div>
-                                                <div style={{ fontSize: 11, color: C.sub }}>{c.email || "—"}</div>
+                                                <div style={{ fontSize: 11, color: c.email ? C.sub : C.muted }}>{c.email || "Not Found"}</div>
                                             </div>
                                         </div>
                                     </td>
@@ -1317,256 +1425,724 @@ const JobConfigView = () => {
     );
 };
 
+
+// ─── ANALYTICS — liquid glass design ────────────────────────────────
+
+// Fieldset card: title cut into border like <fieldset><legend>
+const FieldCard = ({ label, dot, children, xtra = {} }) => (
+    <div style={{
+        position: "relative",
+        border: `1px solid ${C.border}`,
+        borderRadius: 16,
+        padding: "30px 20px 20px",
+        background: C.surface,
+        backdropFilter: "blur(14px)",
+        WebkitBackdropFilter: "blur(14px)",
+        ...xtra,
+    }}>
+        <div style={{
+            position: "absolute", top: -11, left: 16,
+            display: "flex", alignItems: "center", gap: 6,
+            background: C.bg, padding: "0 8px",
+        }}>
+            {dot && <div style={{ width: 6, height: 6, borderRadius: "50%", background: dot, flexShrink: 0 }} />}
+            <span style={{ fontSize: 12, fontWeight: 800, color: C.text, letterSpacing: ".03em" }}>{label}</span>
+        </div>
+        {children}
+    </div>
+);
+
+// Subtle liquid bar — no glow, just a soft fill with top sheen
+const SoftBar = ({ pct, color, h = 6 }) => (
+    <div style={{ width: "100%", height: h, background: C.inputBg, borderRadius: h, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${Math.max(pct, 1)}%`, background: color, borderRadius: h, opacity: 0.85, transition: "width .8s cubic-bezier(.4,0,.2,1)", position: "relative" }}>
+            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "40%", background: "rgba(255,255,255,0.18)", borderRadius: h }} />
+        </div>
+    </div>
+);
+
+// Compact stat — small version of the KPI card
+const StatPill = ({ label, value, color, sub }) => (
+    <div style={{ padding: "12px 14px", borderRadius: 12, background: C.surface, border: `1px solid ${C.border}`, position: "relative", overflow: "hidden" }}>
+        <div style={{ position: "absolute", top: 0, left: "25%", right: "25%", height: 1, background: `linear-gradient(90deg,transparent,${color}55,transparent)` }} />
+        <div style={{ fontSize: 20, fontWeight: 900, color, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+        <div style={{ fontSize: 11, fontWeight: 600, color: C.text, marginTop: 4 }}>{label}</div>
+        {sub && <div style={{ fontSize: 9, color: C.muted, marginTop: 1 }}>{sub}</div>}
+    </div>
+);
+
+// iOS 26–style liquid glass tab bar
+const LiquidTabBar = ({ sections, active, onChange }) => (
+    <div style={{
+        display: "inline-flex", alignSelf: "flex-start",
+        background: C.inputBg,
+        backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+        border: "1px solid rgba(255,255,255,0.09)",
+        borderRadius: 14, padding: 3, gap: 2,
+        boxShadow: "0 2px 12px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.07)",
+    }}>
+        {sections.map(s => {
+            const on = active === s.id;
+            return (
+                <button key={s.id} onClick={() => onChange(s.id)} style={{
+                    padding: "6px 15px", borderRadius: 11, border: "none",
+                    background: on ? C.surface : "transparent",
+                    color: on ? C.text : C.sub,
+                    fontSize: 12, fontWeight: on ? 700 : 500,
+                    cursor: "pointer", fontFamily: "inherit",
+                    transition: "all .18s cubic-bezier(.4,0,.2,1)",
+                    whiteSpace: "nowrap",
+                    boxShadow: on ? "0 1px 6px rgba(0,0,0,.15)" : "none",
+                }}>{s.label}</button>
+            );
+        })}
+    </div>
+);
+
 // ─── ANALYTICS VIEW ───────────────────────────────────────────────────────────
-const AnalyticsView = ({ results, isMobile }) => {
-    if (!results || results.length === 0) {
-        return <EmptyState icon={BarChart2} title="No analytics data" sub="Run the screening pipeline to generate analytics." />;
-    }
+const AnalyticsView = ({ results, isMobile, onNav }) => {
+    const [tab, setTab] = useState("overview");
 
-    const eligible = results.filter(c => c.eligible);
-    const rejected = results.filter(c => !c.eligible);
-    const top = eligible[0];
-    const avgFinal = eligible.length ? Math.round(eligible.reduce((a, c) => a + (c.finalScore || 0), 0) / eligible.length * 100) : 0;
-    const avgSkill = eligible.length ? Math.round(eligible.reduce((a, c) => a + (c.skillScore || 0), 0) / eligible.length * 100) : 0;
-    const avgSem = eligible.length ? Math.round(eligible.reduce((a, c) => a + (c.semanticScore || 0), 0) / eligible.length * 100) : 0;
+    if (!results || results.length === 0)
+        return <EmptyState icon={BarChart2} title="No analytics data" sub="Run the screening pipeline first." />;
 
-    // Vertical score distribution — all candidates, sorted by final score
-    const scoreDist = [...results]
-        .sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0))
-        .map(c => ({
-            name: (c.name || "?").split(" ")[0],
-            Final: Math.round((c.finalScore || 0) * 100),
-            Skill: Math.round((c.skillScore || 0) * 100),
-            Semantic: Math.round((c.semanticScore || 0) * 100),
-        }));
+    const eligible  = results.filter(c => c.eligible);
+    const rejected  = results.filter(c => !c.eligible);
+    const top3      = eligible.slice(0, 3);
+    const borderline = eligible.filter(c => { const s = Math.round((c.finalScore||0)*100); return s >= 50 && s <= 65; });
 
-    // Skill frequency — how many candidates matched each skill
-    const skillCount = {};
-    results.forEach(c => (c.matched_skills || []).forEach(s => { skillCount[s] = (skillCount[s] || 0) + 1; }));
-    const skillFreq = Object.entries(skillCount)
-        .map(([skill, count]) => ({ skill, count }))
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 10);
+    const avg = (arr, key) => arr.length ? Math.round(arr.reduce((a,c) => a+(c[key]||0), 0) / arr.length * 100) : 0;
+    const avgFinal = avg(eligible, "finalScore");
+    const avgSkill = avg(eligible, "skillScore");
+    const avgSem   = avg(eligible, "semanticScore");
+    const passRate = results.length ? Math.round(eligible.length / results.length * 100) : 0;
+    const topScore = eligible.length ? Math.round((eligible[0].finalScore||0)*100) : 0;
 
-    // Score buckets — distribution of candidates by score range
-    const buckets = { "0–20": 0, "21–40": 0, "41–60": 0, "61–80": 0, "81–100": 0 };
+    // Skill maps
+    const skillCount = {}, missingCount = {};
     results.forEach(c => {
-        const s = Math.round((c.finalScore || 0) * 100);
-        if (s <= 20) buckets["0–20"]++;
-        else if (s <= 40) buckets["21–40"]++;
-        else if (s <= 60) buckets["41–60"]++;
-        else if (s <= 80) buckets["61–80"]++;
+        (c.matched_skills||[]).forEach(s => { skillCount[s] = (skillCount[s]||0)+1; });
+        (c.missing_skills||[]).forEach(s => { missingCount[s] = (missingCount[s]||0)+1; });
+    });
+    const coverageData = Object.keys({ ...skillCount, ...missingCount }).map(sk => ({
+        skill: sk,
+        matched: skillCount[sk]||0,
+        pct: Math.round(((skillCount[sk]||0)/results.length)*100),
+    })).sort((a,b) => b.pct - a.pct);
+
+    const gapData = Object.entries(missingCount).map(([skill,count]) => ({
+        skill, count, pct: Math.round(count/results.length*100)
+    })).sort((a,b) => b.count - a.count);
+
+    // Buckets
+    const buckets = {"0–20":0,"21–40":0,"41–60":0,"61–80":0,"81–100":0};
+    results.forEach(c => {
+        const s = Math.round((c.finalScore||0)*100);
+        if (s<=20) buckets["0–20"]++;
+        else if (s<=40) buckets["21–40"]++;
+        else if (s<=60) buckets["41–60"]++;
+        else if (s<=80) buckets["61–80"]++;
         else buckets["81–100"]++;
     });
-    const bucketData = Object.entries(buckets).map(([range, count]) => ({ range, count }));
 
-    const topRadar = top ? (top.matched_skills || []).slice(0, 6).map((s, i) => ({
-        s: s.length > 8 ? s.slice(0, 7) + "…" : s,
-        v: Math.round(55 + ((i * 37 + 13) % 40)),
-    })) : [];
+    // Quadrants
+    const quads = { tr:[], br:[], tl:[], bl:[] };
+    results.forEach(c => {
+        const sk = c.skillScore||0, se = c.semanticScore||0;
+        if (sk>=0.5 && se>=0.45) quads.tr.push(c);
+        else if (sk>=0.5)        quads.br.push(c);
+        else if (se>=0.45)       quads.tl.push(c);
+        else                     quads.bl.push(c);
+    });
 
-    const TOOLTIP = { background: "rgba(10,10,22,0.92)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, fontSize: 11, backdropFilter: "blur(10px)", boxShadow: "0 8px 32px rgba(0,0,0,.55)", color: "#e2e2f0" };
-    const LABEL = { color: "#a0a0c0", fontWeight: 700 };
+    const TABS = [
+        { id:"overview",  label:"Overview"  },
+        { id:"funnel",    label:"Funnel"    },
+        { id:"talent",    label:"Talent"    },
+        { id:"skills",    label:"Skills"    },
+        { id:"decisions", label:"Decisions" },
+    ];
+
+    const TT = { background: "rgba(9,9,11,.96)", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 11, color: C.text, backdropFilter: "blur(12px)", boxShadow: "0 8px 24px rgba(0,0,0,.4)" };
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div>
-                <h2 style={{ fontSize: 20, fontWeight: 800, color: C.text, margin: 0 }}>Analytics</h2>
-                <p style={{ color: C.sub, marginTop: 4, fontSize: 12 }}>Deep-dive into scores, skill coverage, and candidate performance.</p>
-            </div>
+        <div style={{ display:"flex", flexDirection:"column", gap: 18 }}>
 
-            {/* ── KPI strip ─────────────────────────────────────────────── */}
-            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(5,1fr)", gap: 10 }}>
-                {[
-                    { label: "Total Screened", value: results.length, color: C.blue },
-                    { label: "Shortlisted", value: eligible.length, color: C.green },
-                    { label: "Rejected", value: rejected.length, color: "#ef4444" },
-                    { label: "Avg Final Score", value: `${avgFinal}%`, color: C.amber },
-                    { label: "Pass Rate", value: `${results.length ? Math.round(eligible.length / results.length * 100) : 0}%`, color: C.teal },
-                ].map(({ label, value, color }) => (
-                    <div key={label} style={card({ padding: "13px 16px", textAlign: "center" })}>
-                        <div style={{ fontSize: 22, fontWeight: 900, color, lineHeight: 1 }}>{value}</div>
-                        <div style={{ fontSize: 10, color: C.sub, marginTop: 4 }}>{label}</div>
-                    </div>
-                ))}
-            </div>
-
-            {/* ── Vertical score distribution + candidate ranking table ── */}
-            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 13 }}>
-
-                {/* Vertical bar chart */}
-                <div style={card({ padding: 18 })}>
-                    <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 14 }}>Score Distribution — All Candidates</div>
-                    <ResponsiveContainer width="100%" height={Math.max(220, scoreDist.length * 28)}>
-                        <BarChart data={scoreDist} layout="vertical" barSize={7} barGap={2} margin={{ left: 0, right: 10 }}>
-                            <CartesianGrid stroke={C.border} horizontal={false} />
-                            <XAxis type="number" domain={[0, 100]} tick={{ fill: C.sub, fontSize: 10 }} axisLine={false} tickLine={false} />
-                            <YAxis type="category" dataKey="name" tick={{ fill: C.sub, fontSize: 10 }} axisLine={false} tickLine={false} width={60} />
-                            <Tooltip cursor={{ fill: "rgba(255,255,255,0.04)" }} contentStyle={TOOLTIP} labelStyle={LABEL} />
-                            <Bar dataKey="Skill" fill={C.blue} radius={[0, 3, 3, 0]} />
-                            <Bar dataKey="Semantic" fill={C.teal} radius={[0, 3, 3, 0]} />
-                            <Bar dataKey="Final" fill={C.amber} radius={[0, 3, 3, 0]} />
-                        </BarChart>
-                    </ResponsiveContainer>
-                    <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 8 }}>
-                        {[["Skill", C.blue], ["Semantic", C.teal], ["Final", C.amber]].map(([l, c]) => (
-                            <div key={l} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 10, color: C.sub }}>
-                                <div style={{ width: 7, height: 7, borderRadius: 2, background: c }} />{l}
-                            </div>
-                        ))}
+            {/* Header */}
+            <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap: 12 }}>
+                <div>
+                    <div style={{ fontSize: 20, fontWeight: 900, color: C.text, letterSpacing:"-.02em" }}>Recruitment Analytics</div>
+                    <div style={{ fontSize: 11, color: C.sub, marginTop: 3 }}>
+                        {results.length} screened · {eligible.length} shortlisted · {rejected.length} rejected
                     </div>
                 </div>
-
-                {/* Candidate ranking table — all shortlisted */}
-                <div style={card({ padding: 18, display: "flex", flexDirection: "column" })}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                        <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em" }}>Candidate Final Rankings</div>
-                        <button
-                            onClick={() => document.dispatchEvent(new CustomEvent("navTo", { detail: "candidates" }))}
-                            style={{ fontSize: 10, color: C.blue, background: `${C.blue}12`, border: `1px solid ${C.blue}25`, borderRadius: 8, padding: "2px 9px", cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
-                            For more →
-                        </button>
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4, overflowY: "auto", maxHeight: Math.max(260, scoreDist.length * 32) }}>
-                        {eligible.map((c, i) => {
-                            const score = Math.round((c.finalScore || 0) * 100);
-                            const medal = ["🥇", "🥈", "🥉"][i];
-                            const barColor = score >= 80 ? C.green : score >= 60 ? C.blue : score >= 40 ? C.teal : C.amber;
-                            const RC = {
-                                0: { bg: "rgba(255,215,0,.1)", border: "rgba(255,215,0,.35)", text: "#FFD700" },
-                                1: { bg: "rgba(192,192,192,.1)", border: "rgba(192,192,192,.35)", text: "#C0C0C0" },
-                                2: { bg: "rgba(205,127,50,.1)", border: "rgba(205,127,50,.35)", text: "#CD7F32" },
-                            };
-                            const rc = RC[i] || { bg: "transparent", border: C.border, text: C.sub };
-                            return (
-                                <div key={c.id} style={{
-                                    display: "flex", alignItems: "center", gap: 10,
-                                    padding: "9px 12px", borderRadius: 10,
-                                    background: i < 3 ? rc.bg : C.inputBg,
-                                    border: `1px solid ${rc.border}`,
-                                    width: "100%", boxSizing: "border-box",
-                                }}>
-                                    {/* Rank badge */}
-                                    <div style={{ width: 28, height: 28, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", background: i < 3 ? `${rc.text}18` : C.surface, border: `1px solid ${i < 3 ? rc.border : C.border}`, fontSize: i < 3 ? 15 : 10, fontWeight: 800, color: i < 3 ? rc.text : C.sub, flexShrink: 0 }}>
-                                        {medal || `#${i + 1}`}
-                                    </div>
-                                    {/* Name */}
-                                    <div style={{ width: 90, fontSize: 12, color: C.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>{c.name || "?"}</div>
-                                    {/* Progress bar */}
-                                    <div style={{ flex: 1, height: 6, background: `${barColor}20`, borderRadius: 3, overflow: "hidden", minWidth: 40 }}>
-                                        <div style={{ height: "100%", width: `${score}%`, background: barColor, borderRadius: 3, transition: "width .9s ease", boxShadow: `0 0 6px ${barColor}55` }} />
-                                    </div>
-                                    {/* Score */}
-                                    <div style={{ width: 38, fontSize: 12, fontWeight: 800, color: barColor, textAlign: "right", flexShrink: 0 }}>{score}%</div>
-                                    {/* Status dot */}
-                                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: c.eligible ? C.green : "#ef4444", flexShrink: 0, boxShadow: `0 0 5px ${c.eligible ? C.green : "#ef4444"}` }} />
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
+                <LiquidTabBar sections={TABS} active={tab} onChange={setTab} />
             </div>
 
-            {/* ── Top candidate radar + score cards side by side ─────────── */}
-            {top && topRadar.length >= 3 && (
-                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 13, alignItems: "stretch" }}>
-                    {/* Radar */}
-                    <div style={card({ padding: 18 })}>
-                        <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 12 }}>Top Candidate — Skill Radar</div>
-                        <div style={{ textAlign: "center", marginBottom: 6 }}>
-                            <span style={{ fontSize: 14, fontWeight: 800, color: C.blue, background: `${C.blue}12`, padding: "3px 14px", borderRadius: 20, border: `1px solid ${C.blue}30` }}>{top.name}</span>
+            {/* ═══ OVERVIEW ═══════════════════════════════════════════════════ */}
+            {tab === "overview" && (
+                <div style={{ display:"flex", flexDirection:"column", gap: 14 }}>
+
+                    {/* Compact KPI row */}
+                    <div style={{ display:"grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(5,1fr)", gap: 10 }}>
+                        {[
+                            { label:"Screened",    value: results.length,  color: C.blue,   sub:"total resumes"    },
+                            { label:"Shortlisted", value: eligible.length, color: C.green,  sub:"passed filters"   },
+                            { label:"Rejected",    value: rejected.length, color:"#ef4444", sub:"did not qualify"  },
+                            { label:"Pass Rate",   value:`${passRate}%`,   color: C.teal,   sub:"of total pool"    },
+                            { label:"Top Score",   value:`${topScore}%`,   color: C.amber,  sub: eligible[0]?.name?.split(" ")[0] || "—" },
+                        ].map(p => <StatPill key={p.label} {...p} />)}
+                    </div>
+
+                    {/* Score distribution — glass bars, full names, no # prefix */}
+                    <FieldCard label="Score Distribution" dot={C.blue} xtra={{ padding:"30px 14px 14px" }}>
+                        <div style={{ display:"flex", flexDirection:"column", gap: 7 }}>
+                            {[...results].sort((a,b)=>(b.finalScore||0)-(a.finalScore||0)).map((c, i) => {
+                                const fs = Math.round((c.finalScore||0)*100);
+                                const sk = Math.round((c.skillScore||0)*100);
+                                const se = Math.round((c.semanticScore||0)*100);
+                                const col = fs >= 70 ? C.green : fs >= 50 ? C.blue : C.amber;
+                                const medals = ["🥇","🥈","🥉"];
+                                return (
+                                    <div key={c.id} style={{ display:"flex", alignItems:"center", gap: 10 }}>
+                                        {/* Rank — medal or number */}
+                                        <div style={{ width: 22, textAlign:"center", flexShrink: 0, fontSize: i < 3 ? 13 : 10, fontWeight: 700, color: C.muted, lineHeight: 1 }}>
+                                            {i < 3 ? medals[i] : i + 1}
+                                        </div>
+                                        {/* Full name */}
+                                        <div style={{ width: isMobile ? 80 : 130, fontSize: 11, fontWeight: 500, color: C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flexShrink: 0 }}>
+                                            {c.name || "Unknown"}
+                                        </div>
+                                        {/* Liquid glass bar — frosted track, saturated fill, inner sheen only on fill */}
+                                        <div style={{ flex: 1, height: 20, borderRadius: 7, overflow:"hidden", background:C.inputBg, border:`1px solid ${C.border}`, backdropFilter:"blur(6px)", WebkitBackdropFilter:"blur(6px)", position:"relative" }}>
+                                            {/* Fill */}
+                                            <div style={{ position:"absolute", top:0, left:0, bottom:0, width:`${Math.max(fs,1)}%`, background:`linear-gradient(90deg,${col}88,${col}dd)`, transition:"width .85s cubic-bezier(.4,0,.2,1)", borderRadius: "7px 0 0 7px" }}>
+                                                {/* Top sheen — only on fill area */}
+                                                <div style={{ position:"absolute", top:0, left:0, right:0, height:"42%", background:"linear-gradient(180deg,rgba(255,255,255,0.18),rgba(255,255,255,0))", borderRadius:"7px 0 0 0" }} />
+                                                {/* Bottom inner shadow on fill */}
+                                                <div style={{ position:"absolute", bottom:0, left:0, right:0, height:"30%", background:"rgba(0,0,0,0.15)", borderRadius:"0 0 0 7px" }} />
+                                            </div>
+                                            {/* Text overlay */}
+                                            <div style={{ position:"relative", zIndex:1, height:"100%", display:"flex", alignItems:"center", paddingLeft:10, gap:6 }}>
+                                                <span style={{ fontSize:10, fontWeight:800, color:C.text, textShadow:"none", fontVariantNumeric:"tabular-nums" }}>{fs}%</span>
+
+                                            </div>
+                                        </div>
+                                        {/* Status dot */}
+                                        <div style={{ width: 6, height: 6, borderRadius:"50%", flexShrink:0, background: c.eligible ? C.green : "#ef4444", opacity:.75 }} />
+                                    </div>
+                                );
+                            })}
                         </div>
-                        <ResponsiveContainer width="100%" height={200}>
-                            <RadarChart data={topRadar} margin={{ top: 5, right: 20, bottom: 5, left: 20 }}>
-                                <PolarGrid stroke={C.border} />
-                                <PolarAngleAxis dataKey="s" tick={{ fill: C.sub, fontSize: 10 }} />
-                                <Radar dataKey="v" stroke={C.blue} fill={C.blue} fillOpacity={0.18} strokeWidth={2.5} dot={{ fill: C.blue, r: 3 }} />
-                            </RadarChart>
-                        </ResponsiveContainer>
-                    </div>
-
-                    {/* Score breakdown beside radar */}
-                    <div style={card({ padding: 18, display: "flex", flexDirection: "column", justifyContent: "space-between" })}>
-                        <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 14 }}>Score Breakdown</div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, justifyContent: "center" }}>
-                            {[
-                                { label: "Skill Match", value: Math.round((top.skillScore || 0) * 100), color: C.blue },
-                                { label: "Semantic Similarity", value: Math.round((top.semanticScore || 0) * 100), color: C.teal },
-                                { label: "Final Score", value: Math.round((top.finalScore || 0) * 100), color: C.amber },
-                            ].map(({ label, value, color }) => (
-                                <div key={label}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                                        <span style={{ fontSize: 12, color: C.sub }}>{label}</span>
-                                        <span style={{ fontSize: 13, fontWeight: 800, color }}>{value}%</span>
-                                    </div>
-                                    <div style={{ height: 8, background: `${color}15`, borderRadius: 4, overflow: "hidden" }}>
-                                        <div style={{ height: "100%", width: `${value}%`, background: `linear-gradient(90deg,${color},${color}cc)`, borderRadius: 4, boxShadow: `0 0 8px ${color}44`, transition: "width 1s ease" }} />
-                                    </div>
+                        <div style={{ display:"flex", gap:14, marginTop:10, paddingTop:8, borderTop:`1px solid ${C.border}` }}>
+                            {[["● Shortlisted","#22c55e"],["● Rejected","#ef4444"]].map(([l,c])=>(
+                                <div key={l} style={{ display:"flex", alignItems:"center", gap:4, fontSize:9, color:C.muted }}>
+                                    <span style={{color:c}}>●</span>{l.slice(1)}
                                 </div>
                             ))}
                         </div>
-                        <div style={{ marginTop: 16, padding: "10px 14px", borderRadius: 10, background: `${C.blue}08`, border: `1px solid ${C.blue}18` }}>
-                            <div style={{ fontSize: 11, color: C.sub, marginBottom: 4 }}>Matched Skills ({(top.matched_skills || []).length})</div>
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                                {(top.matched_skills || []).map(s => <SkillChip key={s} label={s} matched />)}
+                    </FieldCard>
+
+                    {/* Score Bands — full width horizontal strip, matches score distribution width */}
+                    <FieldCard label="Score Bands" dot={C.amber} xtra={{ padding:"30px 14px 16px" }}>
+                        <div style={{ display:"grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1px 2fr", gap:0, alignItems:"start" }}>
+                            {/* Left: formula + avg stats */}
+                            <div style={{ paddingRight:16 }}>
+                                <div style={{ padding:"9px 12px", borderRadius:9, background:C.inputBg, border:`1px solid ${C.border}`, marginBottom:12 }}>
+                                    <div style={{ fontSize:9, color:C.muted, marginBottom:4, fontWeight:700, textTransform:"uppercase", letterSpacing:".06em" }}>Score Formula</div>
+                                    <div style={{ fontSize:10, color:C.cardText, fontFamily:"monospace", lineHeight:1.7 }}>
+                                        Final = (skill_weight × skill_score) + (sem_weight × semantic_score)
+                                    </div>
+                                    <div style={{ fontSize:9, color:C.muted, marginTop:3 }}>
+                                        Default: <span style={{color:C.blue,fontWeight:700}}>55% skill</span> + <span style={{color:C.teal,fontWeight:700}}>45% semantic</span>
+                                    </div>
+                                </div>
+                                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:6 }}>
+                                    {[["Skill",avgSkill,C.blue],["Semantic",avgSem,C.teal],["Final",avgFinal,C.amber]].map(([l,v,col])=>(
+                                        <div key={l} style={{ textAlign:"center", padding:"8px 4px", borderRadius:9, background:`${col}08`, border:`1px solid ${col}18` }}>
+                                            <div style={{ fontSize:15, fontWeight:900, color:col, fontVariantNumeric:"tabular-nums" }}>{v}%</div>
+                                            <div style={{ fontSize:9, color:C.muted, marginTop:1 }}>avg {l}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            {/* Divider */}
+                            <div style={{ background:C.border, alignSelf:"stretch", margin:"0 4px" }} />
+                            {/* Right: 5 bands */}
+                            <div style={{ display:"flex", flexDirection:"column", gap:10, paddingLeft:16 }}>
+                                {[
+                                    { range:"81–100", label:"Excellent", color:"#10b981" },
+                                    { range:"61–80",  label:"Good",      color:"#6366f1" },
+                                    { range:"41–60",  label:"Average",   color:"#f59e0b" },
+                                    { range:"21–40",  label:"Low",       color:"#f97316" },
+                                    { range:"0–20",   label:"Very Low",  color:"#ef4444" },
+                                ].map(({ range, label, color }) => {
+                                    const count = buckets[range]||0;
+                                    const pct   = results.length ? Math.round(count/results.length*100) : 0;
+                                    return (
+                                        <div key={range}>
+                                            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                                                <span style={{ fontSize:11, color:count?C.text:C.muted, fontWeight:600 }}>{label} <span style={{color:C.muted,fontWeight:400,fontSize:9}}>{range}</span></span>
+                                                <span style={{ fontSize:11, fontWeight:800, color:count?color:C.muted, fontVariantNumeric:"tabular-nums" }}>{count}</span>
+                                            </div>
+                                            <SoftBar pct={pct} color={color} h={6} />
+                                        </div>
+                                    );
+                                })}
                             </div>
                         </div>
+                    </FieldCard>
+
+                    {/* Top Candidates — full width, 3-column card grid */}
+                    {top3.length > 0 && (
+                        <FieldCard label="Top Candidates" dot={C.amber} xtra={{ padding:"30px 14px 14px" }}>
+                            <div style={{ display:"grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap:12 }}>
+                                {top3.map((c, i) => {
+                                    const glow  = [C.amber, "#94a3b8", "#cd7f32"][i];
+                                    const medal = ["🥇","🥈","🥉"][i];
+                                    const fs    = Math.round((c.finalScore||0)*100);
+                                    const sk    = Math.round((c.skillScore||0)*100);
+                                    const se    = Math.round((c.semanticScore||0)*100);
+                                    return (
+                                        <div key={c.id} style={{ borderRadius:14, background:`${glow}06`, border:`1px solid ${glow}20`, overflow:"hidden", position:"relative", display:"flex", flexDirection:"column" }}>
+                                            <div style={{ position:"absolute", top:0, left:0, right:0, height:1, background:`linear-gradient(90deg,transparent,${glow}55,transparent)` }} />
+                                            {/* Header */}
+                                            <div style={{ display:"flex", alignItems:"center", gap:11, padding:"14px 14px 10px" }}>
+                                                <div style={{ width:36, height:36, borderRadius:9, background:`linear-gradient(135deg,${glow}33,${glow}18)`, border:`1px solid ${glow}30`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800, color:glow, flexShrink:0 }}>
+                                                    {(c.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2).toUpperCase()}
+                                                </div>
+                                                <div style={{ flex:1, minWidth:0 }}>
+                                                    <div style={{ fontSize:12, fontWeight:800, color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name}</div>
+                                                    <div style={{ fontSize:9, color:C.muted, marginTop:1 }}>{medal} Rank #{i+1}</div>
+                                                </div>
+                                                <div style={{ fontSize:20, fontWeight:900, color:glow, flexShrink:0, fontVariantNumeric:"tabular-nums" }}>{fs}%</div>
+                                            </div>
+                                            {/* Score bar */}
+                                            <div style={{ padding:"0 14px 10px" }}>
+                                                <SoftBar pct={fs} color={glow} h={5} />
+                                            </div>
+                                            {/* Sk / Se chips */}
+                                            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, padding:"0 14px 12px" }}>
+                                                {[["Skill",sk,C.blue],["Semantic",se,C.teal]].map(([l,v,col])=>(
+                                                    <div key={l} style={{ textAlign:"center", padding:"6px 8px", borderRadius:8, background:`${col}08`, border:`1px solid ${col}16` }}>
+                                                        <div style={{ fontSize:13, fontWeight:800, color:col }}>{v}%</div>
+                                                        <div style={{ fontSize:9, color:C.muted, marginTop:1 }}>{l}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {/* Matched skills */}
+                                            {(c.matched_skills||[]).length>0 && (
+                                                <div style={{ padding:"0 14px 14px", display:"flex", flexWrap:"wrap", gap:4, flex:1 }}>
+                                                    {(c.matched_skills||[]).map(s=>(
+                                                        <span key={s} style={{ fontSize:9, padding:"2px 8px", borderRadius:20, background:`${glow}10`, color:glow, border:`1px solid ${glow}20`, fontWeight:600 }}>{s}</span>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </FieldCard>
+                    )}
+                </div>
+            )}
+
+            {/* ═══ FUNNEL ══════════════════════════════════════════════════════ */}
+            {tab === "funnel" && (
+                <div style={{ display:"flex", flexDirection:"column", gap: 14 }}>
+                    <FieldCard label="Recruitment Funnel" dot={C.blue}>
+                        <p style={{ fontSize:12, color:C.cardText, marginBottom:18, lineHeight:1.6 }}>
+                            Tracks how many candidates progressed through each ML pipeline stage — from raw PDF upload to final shortlist.
+                        </p>
+                        {(() => {
+                            const stages = [
+                                { label:"PDFs Uploaded",       value:results.length,  color:C.blue,    desc:"Raw resumes received"                      },
+                                { label:"Successfully Parsed", value:results.length,  color:"#818cf8", desc:"Text extracted via pdfplumber / PyMuPDF"    },
+                                { label:"Profiles Extracted",  value:results.length,  color:C.teal,    desc:"Name · email · skills · experience via NER" },
+                                { label:"Scored & Ranked",     value:results.length,  color:C.amber,   desc:`Avg final: ${avgFinal}% · skill: ${avgSkill}% · semantic: ${avgSem}%` },
+                                { label:"Shortlisted",         value:eligible.length, color:C.green,   desc:`Pass rate: ${passRate}% of total pool`       },
+                            ];
+                            return stages.map((s, i) => {
+                                const pct  = Math.round(s.value / (stages[0].value||1) * 100);
+                                const drop = i>0 ? stages[i-1].value - s.value : 0;
+                                return (
+                                    <div key={s.label}>
+                                        {drop > 0 && (
+                                            <div style={{ display:"flex", alignItems:"center", gap:0, padding:"2px 0 2px 16px" }}>
+                                                {/* Vertical connector aligned with the left border accent */}
+                                                <div style={{ width:2, height:20, background:`rgba(239,68,68,0.3)`, borderRadius:2, flexShrink:0 }} />
+                                                <div style={{ marginLeft:12, display:"flex", alignItems:"center", gap:5 }}>
+                                                    <span style={{ fontSize:9, color:"#ef4444", fontWeight:700, letterSpacing:".02em" }}>↓ {drop} candidate{drop>1?"s":""} dropped</span>
+                                                </div>
+                                            </div>
+                                        )}
+                                        <div style={{ display:"flex", alignItems:"center", gap:14, padding:"14px 16px", borderRadius:13, background:`${s.color}05`, border:`1px solid ${s.color}16`, marginBottom:2, position:"relative", overflow:"hidden" }}>
+                                            <div style={{ position:"absolute", top:0, left:0, bottom:0, width:2, background:s.color, opacity:.55, borderRadius:2 }} />
+                                            {/* Step number badge */}
+                                            <div style={{ width:26, height:26, borderRadius:8, background:`${s.color}18`, border:`1px solid ${s.color}30`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800, color:s.color, flexShrink:0 }}>
+                                                {i+1}
+                                            </div>
+                                            <div style={{ flex:1, minWidth:0 }}>
+                                                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                                                    <div>
+                                                        <span style={{ fontSize:13, fontWeight:700, color:C.text }}>{s.label}</span>
+                                                        <span style={{ fontSize:10, color:C.muted, marginLeft:8 }}>{s.desc}</span>
+                                                    </div>
+                                                    <span style={{ fontSize:15, fontWeight:900, color:s.color, flexShrink:0, fontVariantNumeric:"tabular-nums", marginLeft:12 }}>{s.value}</span>
+                                                </div>
+                                                <SoftBar pct={pct} color={s.color} h={6} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            });
+                        })()}
+                    </FieldCard>
+
+                    <div style={{ display:"grid", gridTemplateColumns:isMobile?"1fr":"1fr 1fr", gap:14 }}>
+                        {[
+                            { label:"Shortlisted", count:eligible.length, color:C.green,   list:eligible, icon:"✓" },
+                            { label:"Rejected",    count:rejected.length,  color:"#ef4444", list:rejected, icon:"✗" },
+                        ].map(({ label, count, color, list, icon }) => (
+                            <FieldCard key={label} label={label} dot={color}>
+                                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+                                    <span style={{ fontSize:13, fontWeight:700, color }}>{count} candidates</span>
+                                </div>
+                                {/* Scrollable list — no "+N more" text */}
+                                <div style={{ display:"flex", flexDirection:"column", gap:5, maxHeight:240, overflowY:"auto", paddingRight:2 }}>
+                                    {list.map(c => (
+                                        <div key={c.id} style={{ display:"flex", alignItems:"center", gap:9, padding:"7px 10px", borderRadius:9, background:`${color}05`, border:`1px solid ${color}10`, flexShrink:0 }}>
+                                            <span style={{ fontSize:10, color, fontWeight:800, flexShrink:0 }}>{icon}</span>
+                                            <span style={{ fontSize:12, color:C.text, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name}</span>
+                                            <span style={{ fontSize:11, fontWeight:700, color, flexShrink:0, fontVariantNumeric:"tabular-nums" }}>{Math.round((c.finalScore||0)*100)}%</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </FieldCard>
+                        ))}
                     </div>
                 </div>
             )}
 
-            {/* ── Score range distribution — with full explanation ─────────── */}
-            <div style={card({ padding: 18 })}>
-                <div style={{ marginBottom: 14 }}>
-                    <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>Score Range Distribution</div>
-                    <div style={{ fontSize: 12, color: C.cardText, lineHeight: 1.6 }}>
-                        This chart groups all <strong style={{ color: C.text }}>{results.length} screened candidates</strong> into 5 score bands based on their <strong style={{ color: C.amber }}>Final Score</strong> — the weighted combination of skill match and semantic similarity. It helps you quickly see how spread out or concentrated the talent pool is for this role.
-                    </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8 }}>
-                    {[
-                        { range: "0–20", label: "Very Low", desc: "Weak match" },
-                        { range: "21–40", label: "Below Avg", desc: "Some gaps" },
-                        { range: "41–60", label: "Average", desc: "Partial fit" },
-                        { range: "61–80", label: "Good", desc: "Strong match" },
-                        { range: "81–100", label: "Excellent", desc: "Top talent" },
-                    ].map(({ range, label, desc }) => {
-                        const count = buckets[range] || 0;
-                        const pct = results.length ? Math.round(count / results.length * 100) : 0;
-                        const col = range === "81–100" ? C.green : range === "61–80" ? C.blue : range === "41–60" ? C.teal : range === "21–40" ? C.amber : "#ef4444";
-                        return (
-                            <div key={range} style={{ textAlign: "center", padding: "14px 8px", borderRadius: 12, background: `${col}08`, border: `1px solid ${col}25` }}>
-                                <div style={{ fontSize: 26, fontWeight: 900, color: col, lineHeight: 1 }}>{count}</div>
-                                <div style={{ fontSize: 9, color: col, fontWeight: 700, marginTop: 3, textTransform: "uppercase", letterSpacing: ".05em" }}>{label}</div>
-                                <div style={{ fontSize: 10, color: C.sub, margin: "3px 0 1px" }}>{range}</div>
-                                <div style={{ fontSize: 10, fontWeight: 700, color: col }}>{pct}%</div>
-                                <div style={{ fontSize: 9, color: C.muted, marginTop: 3 }}>{desc}</div>
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
+            {/* ═══ TALENT ══════════════════════════════════════════════════════ */}
+            {tab === "talent" && (
+                <div style={{ display:"flex", flexDirection:"column", gap: 14 }}>
 
-            {/* ── Average scores across eligible ───────────────────────────── */}
-            <div style={card({ padding: 18, background: `${C.blue}05`, borderColor: `${C.blue}22` })}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                    <Target size={13} color={C.blue} />
-                    <div style={{ fontSize: 13, fontWeight: 700, color: C.blue }}>Average Scores — Shortlisted Candidates</div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: 10 }}>
-                    {[
-                        { label: "Avg Skill Match", value: `${avgSkill}%`, color: C.blue, desc: "Average skill coverage across shortlisted" },
-                        { label: "Avg Semantic Similarity", value: `${avgSem}%`, color: C.teal, desc: "Average embedding cosine similarity to JD" },
-                        { label: "Avg Final Score", value: `${avgFinal}%`, color: C.amber, desc: "Weighted average using your configured skill/semantic split" },
-                    ].map(({ label, value, color, desc }) => (
-                        <div key={label} style={{ padding: 14, borderRadius: 10, background: C.surface, border: `1px solid ${C.border}`, textAlign: "center" }}>
-                            <div style={{ fontSize: 26, fontWeight: 900, color, marginBottom: 3 }}>{value}</div>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>{label}</div>
-                            <div style={{ fontSize: 11, color: C.sub, lineHeight: 1.5 }}>{desc}</div>
+                    <div style={{ display:"grid", gridTemplateColumns:isMobile?"1fr":"repeat(3,1fr)", gap:10 }}>
+                        {[
+                            { label:"Avg Skill Match",    value:`${avgSkill}%`, color:C.blue,  sub:"skill extraction + alias matching" },
+                            { label:"Avg Semantic Score", value:`${avgSem}%`,   color:C.teal,  sub:"cosine similarity vs job description" },
+                            { label:"Avg Final Score",    value:`${avgFinal}%`, color:C.amber, sub:"weighted avg — shortlisted only" },
+                        ].map(p => <StatPill key={p.label} {...p} />)}
+                    </div>
+
+                    <FieldCard label="Talent Quadrant Map" dot={C.teal}>
+                        <p style={{ fontSize:12, color:C.cardText, marginBottom:14, lineHeight:1.6 }}>
+                            Candidates split by skill coverage vs semantic alignment. <strong style={{color:C.text}}>Ideal Fit</strong> → strong on both → prioritise for interview.
+                        </p>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                            {[
+                                { key:"tr", label:"Ideal Fit",  sub:"High skill · High semantic",  color:C.green,   list:quads.tr, cta:"INTERVIEW NOW" },
+                                { key:"br", label:"Skilled",    sub:"High skill · Low semantic",   color:C.blue,    list:quads.br, cta:"CONSIDER"      },
+                                { key:"tl", label:"Role-Aware", sub:"Low skill · High semantic",   color:C.amber,   list:quads.tl, cta:"REVIEW"        },
+                                { key:"bl", label:"Weak Match", sub:"Low skill · Low semantic",    color:"#ef4444", list:quads.bl, cta:"PASS"          },
+                            ].map(({ key, label, sub, color, list, cta }) => (
+                                <div key={key} style={{ padding:"18px 18px 16px", borderRadius:14, background:`${color}06`, border:`1px solid ${color}20`, position:"relative", overflow:"hidden" }}>
+                                    <div style={{ position:"absolute", top:0, left:0, right:0, height:1, background:`linear-gradient(90deg,transparent,${color}55,transparent)` }} />
+                                    {/* Header */}
+                                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 }}>
+                                        <div>
+                                            <div style={{ fontSize:14, fontWeight:800, color, letterSpacing:"-.01em" }}>{label}</div>
+                                            <div style={{ fontSize:10, color:C.muted, marginTop:2 }}>{sub}</div>
+                                        </div>
+                                        <div style={{ textAlign:"right" }}>
+                                            <div style={{ fontSize:26, fontWeight:900, color, fontVariantNumeric:"tabular-nums", lineHeight:1 }}>{list.length}</div>
+                                            <div style={{ fontSize:8, fontWeight:800, color, letterSpacing:".06em", marginTop:2, opacity:.8 }}>{cta}</div>
+                                        </div>
+                                    </div>
+                                    {/* Candidate rows — scrollable, each with score */}
+                                    <div style={{ display:"flex", flexDirection:"column", gap:5, maxHeight:160, overflowY:"auto", scrollbarWidth:"none" }}>
+                                        {list.map(c => {
+                                            const fs = Math.round((c.finalScore||0)*100);
+                                            return (
+                                                <div key={c.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 9px", borderRadius:8, background:`${color}08`, border:`1px solid ${color}14` }}>
+                                                    <div style={{ width:22, height:22, borderRadius:6, background:`${color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:800, color, flexShrink:0 }}>
+                                                        {(c.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2).toUpperCase()}
+                                                    </div>
+                                                    <span style={{ fontSize:11, color:C.text, fontWeight:600, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name}</span>
+                                                    <span style={{ fontSize:11, fontWeight:800, color, flexShrink:0, fontVariantNumeric:"tabular-nums" }}>{fs}%</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                    ))}
+                    </FieldCard>
+
+                    <FieldCard label="Top 10 Talent Rankings" dot={C.blue}>
+                        <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:12 }}>
+                            <button onClick={() => onNav && onNav("candidates")} style={{ fontSize:11, fontWeight:600, color:C.blue, background:`${C.blue}10`, border:`1px solid ${C.blue}25`, borderRadius:8, padding:"4px 12px", cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:5 }}>
+                                View All Candidates →
+                            </button>
+                        </div>
+                        <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                            {eligible.slice(0,10).map((c,i) => {
+                                const fs = Math.round((c.finalScore||0)*100);
+                                const sk = Math.round((c.skillScore||0)*100);
+                                const se = Math.round((c.semanticScore||0)*100);
+                                const rankColor = i===0?C.amber:i===1?"#94a3b8":i===2?"#cd7f32":C.blue;
+                                const medals = ["🥇","🥈","🥉"];
+                                return (
+                                    <div key={c.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"11px 14px", borderRadius:12, background: i<3?`${rankColor}07`:C.surface, border:`1px solid ${i<3?`${rankColor}20`:C.border}`, transition:"background .15s" }}
+                                        onMouseEnter={e=>e.currentTarget.style.background=`${C.blue}07`}
+                                        onMouseLeave={e=>e.currentTarget.style.background=i<3?`${rankColor}07`:C.surface}>
+                                        {/* Rank */}
+                                        <div style={{ width:28, textAlign:"center", flexShrink:0, fontSize: i<3?15:11, fontWeight:800, color:rankColor, lineHeight:1 }}>
+                                            {i<3?medals[i]:i+1}
+                                        </div>
+                                        {/* Avatar + name */}
+                                        <div style={{ width:30, height:30, borderRadius:8, background:`${rankColor}18`, border:`1px solid ${rankColor}28`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:9, fontWeight:800, color:rankColor, flexShrink:0 }}>
+                                            {(c.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2).toUpperCase()}
+                                        </div>
+                                        <div style={{ flex:1, minWidth:0 }}>
+                                            <div style={{ fontSize:12, fontWeight:700, color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name}</div>
+                                            <div style={{ fontSize:9, color:C.muted }}>sk {sk}% · se {se}%</div>
+                                        </div>
+                                        {/* Talent score bar + final % */}
+                                        <div style={{ width:100, flexShrink:0 }}>
+                                            <SoftBar pct={fs} color={rankColor} h={5} />
+                                        </div>
+                                        <div style={{ width:36, textAlign:"right", fontSize:13, fontWeight:900, color:rankColor, flexShrink:0, fontVariantNumeric:"tabular-nums" }}>{fs}%</div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </FieldCard>
                 </div>
-            </div>
+            )}
+
+            {/* ═══ SKILLS ══════════════════════════════════════════════════════ */}
+            {tab === "skills" && (
+                <div style={{ display:"flex", flexDirection:"column", gap: 14 }}>
+                    <div style={{ display:"grid", gridTemplateColumns:isMobile?"1fr":"1fr 1fr", gap:14, alignItems:"start" }}>
+
+                        <FieldCard label="Skill Coverage" dot={C.green}>
+                            <p style={{ fontSize:11, color:C.cardText, marginBottom:14, lineHeight:1.5 }}>How many candidates match each required skill.</p>
+                            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                                {coverageData.map(({ skill, matched, pct }) => {
+                                    const col = pct>=70?C.green:pct>=40?C.blue:pct>=20?C.amber:"#ef4444";
+                                    return (
+                                        <div key={skill} style={{ display:"flex", alignItems:"center", gap:10 }}>
+                                            <div style={{ width:105, fontSize:11, fontWeight:500, color:C.text, textAlign:"right", flexShrink:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{skill}</div>
+                                            <div style={{ flex:1 }}><SoftBar pct={pct} color={col} h={6} /></div>
+                                            <div style={{ width:42, fontSize:11, fontWeight:700, color:col, textAlign:"right", flexShrink:0, fontVariantNumeric:"tabular-nums" }}>{matched}<span style={{color:C.muted,fontWeight:400}}>/{results.length}</span></div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </FieldCard>
+
+                        <FieldCard label="Skill Gap Intel" dot="#ef4444" xtra={{ border:`1px solid rgba(239,68,68,.2)` }}>
+                            <p style={{ fontSize:11, color:C.cardText, marginBottom:14, lineHeight:1.5 }}>Required skills most commonly missing from the talent pool.</p>
+                            {gapData.length === 0 ? (
+                                <div style={{ textAlign:"center", padding:"16px", color:C.green, fontSize:12, fontWeight:700 }}>✓ No critical skill gaps detected</div>
+                            ) : (
+                                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                                    {gapData.map(({ skill, count, pct }) => {
+                                        const col = pct>=70?"#ef4444":pct>=40?"#f97316":pct>=20?C.amber:C.teal;
+                                        const tag = pct>=70?"RARE":pct>=40?"SCARCE":pct>=20?"LOW":"OK";
+                                        return (
+                                            <div key={skill} style={{ display:"flex", alignItems:"center", gap:10 }}>
+                                                <div style={{ width:105, fontSize:11, fontWeight:500, color:C.text, textAlign:"right", flexShrink:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{skill}</div>
+                                                <div style={{ flex:1 }}><SoftBar pct={pct} color={col} h={6} /></div>
+                                                <div style={{ width:24, fontSize:11, fontWeight:700, color:col, textAlign:"right", flexShrink:0, fontVariantNumeric:"tabular-nums" }}>{count}</div>
+                                                <span style={{ fontSize:8, padding:"2px 5px", borderRadius:4, fontWeight:700, background:`${col}14`, color:col, border:`1px solid ${col}20`, flexShrink:0, fontFamily:"monospace", minWidth:36, textAlign:"center" }}>{tag}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </FieldCard>
+                    </div>
+
+                    {eligible[0] && (eligible[0].matched_skills||[]).length >= 3 && (
+                        <FieldCard label={`Top Candidate Skill Radar — ${eligible[0].name}`} dot={C.blue}>
+                            <div style={{ fontSize:11, color:C.muted, marginBottom:14 }}>
+                                Hover over each point to see the skill score. Each axis represents a required skill matched by this candidate.
+                            </div>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <RadarChart data={(() => {
+                                    const c0 = eligible[0];
+                                    const matched = new Set((c0.matched_skills||[]).map(s=>s.toLowerCase()));
+                                    const allSkills = [...new Set([...(c0.matched_skills||[]), ...(c0.missing_skills||[])])].slice(0,6);
+                                    const semBase = Math.round((c0.semanticScore||0)*100);
+                                    return allSkills.map(s => ({
+                                        skill: s,
+                                        score: matched.has(s.toLowerCase())
+                                            ? Math.min(100, Math.round(semBase * 0.4 + Math.round((c0.skillScore||0)*100) * 0.6))
+                                            : Math.min(35, Math.round(semBase * 0.35)),
+                                        fullMark: 100,
+                                    }));
+                                })()} outerRadius="70%" margin={{top:16,right:28,bottom:16,left:28}}>
+                                    <PolarGrid gridType="circle" stroke={C.border} />
+                                    <PolarAngleAxis dataKey="skill" tick={{ fill:C.sub, fontSize:11, fontWeight:600 }} />
+                                    <Tooltip
+                                        contentStyle={{ background:"rgba(9,9,11,.95)", border:`1px solid ${C.border}`, borderRadius:10, fontSize:12, backdropFilter:"blur(12px)", boxShadow:"0 8px 24px rgba(0,0,0,.5)", color:C.text, padding:"8px 12px" }}
+                                        formatter={(value, name) => [`${value}%`, "Match Score"]}
+                                        labelStyle={{ color:C.blue, fontWeight:700, marginBottom:2 }}
+                                    />
+                                    <Radar dataKey="score" stroke={C.blue} strokeWidth={2.5} fill={C.blue} fillOpacity={0.2} dot={{ fill:C.blue, r:5, strokeWidth:2, stroke:"rgba(255,255,255,0.3)" }} activeDot={{ r:7, fill:C.blue, stroke:"#fff", strokeWidth:2 }} />
+                                </RadarChart>
+                            </ResponsiveContainer>
+                        </FieldCard>
+                    )}
+                </div>
+            )}
+
+            {/* ═══ DECISIONS ═══════════════════════════════════════════════════ */}
+            {tab === "decisions" && (
+                <div style={{ display:"flex", flexDirection:"column", gap: 14 }}>
+
+                    {/* Hiring Recommendation — full priority layout like quadrant map */}
+                    <FieldCard label="Hiring Recommendation" dot={C.green}>
+                        <p style={{ fontSize:11, color:C.sub, marginBottom:16, lineHeight:1.6 }}>
+                            Action-prioritised summary for the HR team. Review each group and proceed accordingly.
+                        </p>
+                        {(() => {
+                            const groups = [
+                                { label:"Interview Now",    list:eligible.filter(c=>Math.round((c.finalScore||0)*100)>=70), color:C.green,   action:"Strong match — schedule interview", priority:"HIGH PRIORITY", cap:null },
+                                { label:"Secondary Review", list:borderline.slice(0,3),                                       color:C.amber,   action:`${borderline.length} borderline candidates — see full list below`, priority:"REVIEW", cap:borderline.length, capNav:true },
+                                { label:"Archive",          list:rejected,                                                    color:"#ef4444", action:"Did not qualify — send rejection", priority:"ARCHIVE", cap:null },
+                            ];
+                            return (
+                                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                                    {groups.map(({ label, list, color, action, priority, cap, capNav }) => (
+                                        <div key={label} style={{ borderRadius:14, border:`1px solid ${color}20`, overflow:"hidden", background:`${color}04` }}>
+                                            {/* Group header */}
+                                            <div style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", borderBottom: list.length ? `1px solid ${color}12` : "none", background:`${color}07` }}>
+                                                <div style={{ position:"relative" }}>
+                                                    <div style={{ width:8, height:8, borderRadius:"50%", background:color }} />
+                                                    <div style={{ position:"absolute", inset:0, borderRadius:"50%", background:color, opacity:.35, transform:"scale(2.2)" }} />
+                                                </div>
+                                                <div style={{ flex:1 }}>
+                                                    <div style={{ fontSize:13, fontWeight:800, color }}>{label}</div>
+                                                    <div style={{ fontSize:10, color:C.muted, marginTop:1 }}>{action}</div>
+                                                </div>
+                                                <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+                                                    <span style={{ fontSize:9, padding:"3px 9px", borderRadius:20, fontWeight:800, background:`${color}14`, color, border:`1px solid ${color}28`, letterSpacing:".05em" }}>{priority}</span>
+                                                    <span style={{ fontSize:20, fontWeight:900, color, fontVariantNumeric:"tabular-nums", lineHeight:1 }}>{list.length}</span>
+                                                </div>
+                                            </div>
+                                            {/* Scrollable candidate rows */}
+                                            {list.length > 0 && (
+                                                <div style={{ display:"flex", flexDirection:"column", gap:0, maxHeight:180, overflowY:"auto", scrollbarWidth:"none" }}>
+                                                    {list.map((c, idx) => {
+                                                        const fs = Math.round((c.finalScore||0)*100);
+                                                        const sk = Math.round((c.skillScore||0)*100);
+                                                        const se = Math.round((c.semanticScore||0)*100);
+                                                        return (
+                                                            <div key={c.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"9px 16px", borderBottom: idx < list.length-1 ? `1px solid ${color}08` : "none", transition:"background .12s" }}
+                                                                onMouseEnter={e=>e.currentTarget.style.background=`${color}07`}
+                                                                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                                                                <div style={{ width:26, height:26, borderRadius:7, background:`${color}14`, border:`1px solid ${color}22`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:800, color, flexShrink:0 }}>
+                                                                    {(c.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2).toUpperCase()}
+                                                                </div>
+                                                                <div style={{ flex:1, minWidth:0 }}>
+                                                                    <div style={{ fontSize:12, fontWeight:600, color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name}</div>
+                                                                    <div style={{ fontSize:9, color:C.muted, marginTop:1 }}>sk {sk}% · se {se}%</div>
+                                                                </div>
+                                                                <div style={{ width:70, flexShrink:0 }}>
+                                                                    <SoftBar pct={fs} color={color} h={4} />
+                                                                </div>
+                                                                <span style={{ fontSize:12, fontWeight:800, color, flexShrink:0, fontVariantNumeric:"tabular-nums", minWidth:32, textAlign:"right" }}>{fs}%</span>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                            {list.length === 0 && (
+                                                <div style={{ padding:"12px 16px", fontSize:11, color:C.muted }}>None in this group.</div>
+                                            )}
+                                            {capNav && cap > 3 && (
+                                                <div style={{ padding:"8px 16px", borderTop:`1px solid ${color}10` }}>
+                                                    <button onClick={() => {
+                                                        const el = document.getElementById("borderline-section");
+                                                        if (el) el.scrollIntoView({ behavior:"smooth", block:"start" });
+                                                    }} style={{ fontSize:11, fontWeight:600, color, background:`${color}0e`, border:`1px solid ${color}25`, borderRadius:8, padding:"4px 12px", cursor:"pointer", fontFamily:"inherit" }}>
+                                                        See all {cap} borderline candidates ↓
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            );
+                        })()}
+                    </FieldCard>
+
+                    {/* Borderline */}
+                    {borderline.length > 0 && (
+                        <div id="borderline-section"><FieldCard label="Borderline Review" dot={C.amber} xtra={{ border:`1px solid ${C.amber}22` }}>
+                            <p style={{ fontSize:12, color:C.cardText, marginBottom:14, lineHeight:1.6 }}>
+                                These candidates scored <strong style={{color:C.amber}}>50–65%</strong> — shortlisted but close to the cutoff. Recommend manual review before final decision.
+                            </p>
+                            <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+                                {borderline.map(c => {
+                                    const fs=Math.round((c.finalScore||0)*100), sk=Math.round((c.skillScore||0)*100), se=Math.round((c.semanticScore||0)*100);
+                                    return (
+                                        <div key={c.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"11px 14px", borderRadius:12, background:`${C.amber}05`, border:`1px solid ${C.amber}15` }}>
+                                            <div style={{ width:30,height:30,borderRadius:8,background:`${C.amber}15`,border:`1px solid ${C.amber}25`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:800,color:C.amber,flexShrink:0 }}>
+                                                {(c.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2).toUpperCase()}
+                                            </div>
+                                            <div style={{ flex:1, minWidth:0 }}>
+                                                <div style={{ fontSize:12, fontWeight:700, color:C.text }}>{c.name}</div>
+                                                <div style={{ fontSize:10, color:C.muted }}>{c.email||"No email"}</div>
+                                            </div>
+                                            <div style={{ display:"flex", gap:5, flexShrink:0 }}>
+                                                {[["SK",sk,C.blue],["SE",se,C.teal],["FS",fs,C.amber]].map(([l,v,col])=>(
+                                                    <div key={l} style={{ textAlign:"center", padding:"4px 7px", borderRadius:7, background:`${col}09`, border:`1px solid ${col}18`, minWidth:36 }}>
+                                                        <div style={{ fontSize:11, fontWeight:800, color:col, fontVariantNumeric:"tabular-nums" }}>{v}%</div>
+                                                        <div style={{ fontSize:8, color:C.muted }}>{l}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <span style={{ fontSize:9, padding:"3px 8px", borderRadius:20, background:`${C.amber}14`, color:C.amber, border:`1px solid ${C.amber}30`, fontWeight:700, fontFamily:"monospace", flexShrink:0 }}>REVIEW</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </FieldCard></div>
+                    )}
+
+                    {/* Rejection log */}
+                    {rejected.length > 0 && (
+                        <FieldCard label="Rejection Log" dot="#ef4444" xtra={{ border:"1px solid rgba(239,68,68,.18)" }}>
+                            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                                {rejected.map((c,i)=>(
+                                    <div key={c.id||i} style={{ display:"flex", alignItems:"center", gap:11, padding:"9px 12px", borderRadius:11, background:"rgba(239,68,68,.03)", border:"1px solid rgba(239,68,68,.08)" }}>
+                                        <div style={{ width:28,height:28,borderRadius:7,background:"rgba(239,68,68,.1)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:800,color:"#ef4444",flexShrink:0 }}>
+                                            {(c.name||"?").split(" ").map(n=>n[0]).join("").slice(0,2).toUpperCase()}
+                                        </div>
+                                        <div style={{ flex:1, minWidth:0 }}>
+                                            <div style={{ fontSize:12, fontWeight:700, color:C.text }}>{c.name||"Unknown"}</div>
+                                            <div style={{ fontSize:10, color:"#ef4444", marginTop:1, fontFamily:"monospace" }}>✗ {c.rejection_reason||"Did not meet criteria"}</div>
+                                        </div>
+                                        <div style={{ display:"flex", gap:5, flexShrink:0 }}>
+                                            {[["SK",Math.round((c.skillScore||0)*100),C.blue],["SE",Math.round((c.semanticScore||0)*100),C.teal]].map(([l,v,col])=>(
+                                                <div key={l} style={{ textAlign:"center", padding:"3px 7px", borderRadius:6, background:`${col}09`, border:`1px solid ${col}16` }}>
+                                                    <div style={{ fontSize:11, fontWeight:800, color:col, fontVariantNumeric:"tabular-nums" }}>{v}%</div>
+                                                    <div style={{ fontSize:8, color:C.muted }}>{l}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </FieldCard>
+                    )}
+                </div>
+            )}
 
         </div>
     );
@@ -1588,6 +2164,23 @@ export default function App() {
         } catch { return { name: "", email: "", role: "", org: "" }; }
     });
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [backendOnline, setBackendOnline] = useState(null); // null=checking, true=online, false=offline
+
+    // Poll /api/health every 5 s to reflect real backend status
+    useEffect(() => {
+        const check = async () => {
+            try {
+                const ctrl = new AbortController();
+                const t = setTimeout(() => ctrl.abort(), 2500);
+                const res = await fetch(`${BASE}/api/health`, { signal: ctrl.signal });
+                clearTimeout(t);
+                setBackendOnline(res.ok);
+            } catch { setBackendOnline(false); }
+        };
+        check();
+        const id = setInterval(check, 5000);
+        return () => clearInterval(id);
+    }, []);
 
     // Persist profile to localStorage whenever it changes
     const handleSaveProfile = (newProfile) => {
@@ -1628,8 +2221,11 @@ export default function App() {
     };
 
     const handleProcessingDone = apiResults => {
-        setResults(apiResults || []);
-        setNav(apiResults?.length ? "dashboard" : "upload");
+        const r = apiResults || [];
+        setResults(r);
+        // Only redirect to upload if nothing was processed at all.
+        // If results exist but all are rejected, still go to dashboard.
+        setNav(r.length > 0 ? "dashboard" : "upload");
     };
 
     // Switch model — updates state and tells Flask
@@ -1647,11 +2243,11 @@ export default function App() {
     // Map nav keys to view components
     const viewMap = {
         dashboard: <DashboardView results={results} onNav={go} isMobile={isMobile} activeModel={activeModel} onModelChange={handleModelChange} />,
-        upload: <UploadView onStartScreening={handleStartScreening} activeModel={activeModel} onModelChange={handleModelChange} isMobile={isMobile} />,
+        upload: <UploadView onStartScreening={handleStartScreening} activeModel={activeModel} onModelChange={handleModelChange} isMobile={isMobile} backendOnline={backendOnline} />,
         processing: <ProcessingView config={screeningConfig} onDone={handleProcessingDone} />,
         config: <JobConfigView />,
         candidates: <CandidatesView results={results} onNav={go} isMobile={isMobile} />,
-        analytics: <AnalyticsView results={results} isMobile={isMobile} />,
+        analytics: <AnalyticsView results={results} isMobile={isMobile} onNav={go} />,
     };
 
     // Sidebar content (shared between desktop sticky + mobile drawer)
@@ -1669,7 +2265,7 @@ export default function App() {
                     </div>
                 </div>
                 {/* Developer credit */}
-                <div style={{ marginTop: 10, padding: "7px 9px", borderRadius: 8, background: `${C.blue}08`, border: `1px solid ${C.blue}18` }}>
+                <div style={{ marginTop: 20, padding: "7px 9px", borderRadius: 8, background: `${C.blue}08`, border: `1px solid ${C.blue}18` }}>
                     <div style={{ fontSize: 9, color: C.muted, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 2 }}>Developed by</div>
                     <div style={{ fontSize: 12, fontWeight: 800, color: C.blue }}>Madhan Kumar</div>
                     <div style={{ fontSize: 9, color: C.sub }}>B.Sc CS · Final Year Project</div>
@@ -1699,11 +2295,24 @@ export default function App() {
                 })}
             </nav>
 
-            {/* Pipeline status */}
-            <div style={{ padding: "8px 10px", borderRadius: 8, background: `${C.green}08`, border: `1px solid ${C.green}20`, fontSize: 11, color: C.green, display: "flex", alignItems: "center", gap: 7 }}>
-                <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.green, animation: "pulse 2s infinite", flexShrink: 0 }} />
-                {results.length > 0 ? `${results.length} candidates ranked` : "Pipeline Ready"}
-            </div>
+            {/* Pipeline status — reflects real /api/health poll */}
+            {(() => {
+                const isOff = backendOnline === false;
+                const isChecking = backendOnline === null;
+                const col = isOff ? "#ef4444" : isChecking ? C.muted : C.green;
+                const bg = isOff ? "rgba(239,68,68,.08)" : isChecking ? `${C.muted}08` : `${C.green}08`;
+                const bd = isOff ? "rgba(239,68,68,.20)" : isChecking ? `${C.muted}20` : `${C.green}20`;
+                const label = isOff ? "Pipeline Offline"
+                    : isChecking ? "Checking\u2026"
+                    : results.length > 0 ? `${results.length} candidates ranked`
+                    : "Pipeline Ready";
+                return (
+                    <div style={{ padding: "8px 10px", borderRadius: 8, background: bg, border: `1px solid ${bd}`, fontSize: 11, color: col, display: "flex", alignItems: "center", gap: 7 }}>
+                        <div style={{ width: 6, height: 6, borderRadius: "50%", background: col, flexShrink: 0, animation: (!isOff && !isChecking) ? "pulse 2s infinite" : "none" }} />
+                        {label}
+                    </div>
+                );
+            })()}
         </>
     );
 
@@ -1714,7 +2323,7 @@ export default function App() {
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap');
         *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
         html { font-size:16px; }
-        body { background:${C.bg}; font-family:'Plus Jakarta Sans',sans-serif; color:${C.text}; -webkit-font-smoothing:antialiased; }
+        body { background:${C.bg}; font-family:'Plus Jakarta Sans',sans-serif; color:${C.text}; -webkit-font-smoothing:antialiased; font-weight:500; }
         ::-webkit-scrollbar { width:4px; height:4px; }
         ::-webkit-scrollbar-track { background:transparent; }
         ::-webkit-scrollbar-thumb { background:${C.scrollThumb}; border-radius:2px; }
