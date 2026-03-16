@@ -49,7 +49,7 @@ from semantic_matcher      import (
     ENSEMBLE_WEIGHTS,
 )
 from scoring_engine        import ScoringConfig, score_candidates
-from metrics_store         import record_run
+from metrics_store         import record_run, load_latest_run
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -808,6 +808,30 @@ def compare():
         "candidate_b": cand_b,
         "profile_delta": delta,
         "score_delta": score_delta,
+    }), 200
+
+
+@app.route("/metrics/latest", methods=["GET"])
+def get_metrics_latest():
+    """Return evaluation metrics for the most recent screening run."""
+    run = load_latest_run()
+    if not run:
+        return jsonify({"error": "No screening runs found", "status": 404}), 404
+
+    ev    = run.get("evaluation") or {}
+    stats = run.get("stats")      or {}
+
+    return jsonify({
+        "model":            run.get("model_key"),
+        "candidate_count":  run.get("resume_count"),
+        "threshold":        ev.get("threshold"),
+        "accuracy":         ev.get("accuracy"),
+        "precision":        ev.get("precision"),
+        "recall":           ev.get("recall"),
+        "f1":               ev.get("f1"),
+        "mean_similarity":  stats.get("mean"),
+        "std_similarity":   stats.get("std"),
+        "timestamp":        run.get("timestamp"),
     }), 200
 
 

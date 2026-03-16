@@ -135,6 +135,30 @@ def record_run(
         **(extra or {}),
     }
 
+    # ── Classification evaluation metrics ─────────────────────────────────────
+    # Build ordered (filename → similarity) and (filename → eligible) maps so
+    # that the two lists share the same iteration order.
+    sim_map: dict[str, float] = {
+        r["filename"]: r["similarity_score"]
+        for r in similarity_results if "similarity_score" in r
+    }
+    if final_scores:
+        eligible_map: dict[str, bool] = {
+            c["filename"]: bool(c.get("eligible", False))
+            for c in final_scores if "filename" in c
+        }
+        # Only include resumes that appear in both lists
+        common = [f for f in sim_map if f in eligible_map]
+        eval_sims   = [sim_map[f] for f in common]
+        eval_flags  = [eligible_map[f] for f in common]
+    else:
+        eval_sims  = list(sim_map.values())
+        eval_flags = None  # fall back to ground_truth=True for all
+
+    eval_entry = compute_evaluation_metrics(eval_sims, eligible_flags=eval_flags)
+    if eval_entry:
+        entry["evaluation"] = eval_entry
+
     # ── Append to JSONL log ───────────────────────────────────────────────────
     try:
         with open(METRICS_LOG_FILE, "a", encoding="utf-8") as fh:
@@ -235,6 +259,63 @@ def _spearman(results_a: list[dict], results_b: list[dict]) -> dict:
     rho = 1.0 - (6.0 * d_sq_sum) / (n * (n ** 2 - 1))
 
     return {"rho": round(rho, 4), "n": n}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EVALUATION METRICS
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_THRESHOLD = 0.60
+
+
+def compute_evaluation_metrics(
+    sim_values: list[float],
+    threshold: float = DEFAULT_THRESHOLD,
+    eligible_flags: list[bool] | None = None,
+) -> dict:
+    """
+    Derive classification metrics from cosine similarity scores.
+
+    Classification rule:
+        prediction    = similarity >= threshold
+        ground_truth  = eligible_flags[i] when provided, else True for all
+                        (treat every candidate as a true-positive target)
+
+    Returns a dict with: threshold, tp, tn, fp, fn,
+    accuracy, precision, recall, f1 — all rounded to 4 d.p.
+    Returns an empty dict if sim_values is empty.
+    """
+    total = len(sim_values)
+    if total == 0:
+        return {}
+
+    if eligible_flags is not None and len(eligible_flags) == total:
+        gt = list(eligible_flags)
+    else:
+        gt = [True] * total
+
+    tp = sum(1 for s, g in zip(sim_values, gt) if s >= threshold and g)
+    tn = sum(1 for s, g in zip(sim_values, gt) if s <  threshold and not g)
+    fp = sum(1 for s, g in zip(sim_values, gt) if s >= threshold and not g)
+    fn = sum(1 for s, g in zip(sim_values, gt) if s <  threshold and g)
+
+    accuracy  = (tp + tn) / total if total > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1        = (2 * precision * recall / (precision + recall)
+                 if (precision + recall) > 0 else 0.0)
+
+    return {
+        "threshold": threshold,
+        "tp":        tp,
+        "tn":        tn,
+        "fp":        fp,
+        "fn":        fn,
+        "accuracy":  round(accuracy,  4),
+        "precision": round(precision, 4),
+        "recall":    round(recall,    4),
+        "f1":        round(f1,        4),
+    }
 
 
 def _append_embeddings(run_id: str, embeddings: dict[str, list[float]]):
@@ -416,6 +497,24 @@ def _print_run_detail(run: dict):
                 f"{'Yes' if c.get('eligible') else 'No'}"
             )
 
+    # ── Evaluation metrics ────────────────────────────────────────────────────
+    ev = run.get("evaluation")
+    if ev:
+        # Threshold fallback is purely defensive; new records always store it.
+        threshold = ev.get("threshold", DEFAULT_THRESHOLD)
+        print(f"\n  --- Evaluation Metrics ---")
+        print(f"  Threshold : {threshold:.2f}")
+        print(f"  TP={ev.get('tp','—')}  TN={ev.get('tn','—')}  FP={ev.get('fp','—')}  FN={ev.get('fn','—')}")
+        # Values are stored as fractions (0–1); display at 2 d.p. to match
+        # the expected output format (e.g. 0.91, 0.95).
+        print(f"  Accuracy  : {ev.get('accuracy',  0):.2f}")
+        print(f"  Precision : {ev.get('precision', 0):.2f}")
+        print(f"  Recall    : {ev.get('recall',    0):.2f}")
+        print(f"  F1 Score  : {ev.get('f1',        0):.2f}")
+    else:
+        print(f"\n  --- Evaluation Metrics ---")
+        print(f"  N/A  (run pre-dates evaluation feature)")
+
     print(f"\n{sep}")
 
 
@@ -429,12 +528,15 @@ def export_to_csv(output_path: str = "metrics_export.csv"):
     fieldnames = [
         "run_id", "timestamp", "model_key", "job_description",
         "resume_count", "cosine_mean", "cosine_std", "cosine_min", "cosine_max",
+        "eval_threshold", "eval_tp", "eval_tn", "eval_fp", "eval_fn",
+        "eval_accuracy", "eval_precision", "eval_recall", "eval_f1",
         "candidate_rank", "candidate_name", "candidate_file",
         "skill_score", "semantic_score", "final_score", "eligible",
     ]
 
     rows = []
     for run in runs:
+        ev = run.get("evaluation") or {}
         base = {
             "run_id":          run.get("run_id", ""),
             "timestamp":       run.get("timestamp", ""),
@@ -445,6 +547,16 @@ def export_to_csv(output_path: str = "metrics_export.csv"):
             "cosine_std":      run.get("stats", {}).get("std", ""),
             "cosine_min":      run.get("stats", {}).get("min", ""),
             "cosine_max":      run.get("stats", {}).get("max", ""),
+            # evaluation — N/A for legacy records that pre-date this feature
+            "eval_threshold":  ev.get("threshold", "N/A"),
+            "eval_tp":         ev.get("tp",        "N/A"),
+            "eval_tn":         ev.get("tn",        "N/A"),
+            "eval_fp":         ev.get("fp",        "N/A"),
+            "eval_fn":         ev.get("fn",        "N/A"),
+            "eval_accuracy":   ev.get("accuracy",  "N/A"),
+            "eval_precision":  ev.get("precision", "N/A"),
+            "eval_recall":     ev.get("recall",    "N/A"),
+            "eval_f1":         ev.get("f1",        "N/A"),
         }
         rankings = run.get("rankings", [])
         if rankings:
