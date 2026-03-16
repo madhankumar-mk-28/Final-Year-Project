@@ -17,6 +17,7 @@ Endpoints:
     POST /api/clear           → clear all uploads and results
     GET  /api/export          → download latest results as CSV
     GET  /api/audit           → return recent screening audit log
+    GET  /metrics/latest      → return model evaluation metrics for the latest run
 
 Run:
     python app.py
@@ -49,7 +50,7 @@ from semantic_matcher      import (
     ENSEMBLE_WEIGHTS,
 )
 from scoring_engine        import ScoringConfig, score_candidates
-from metrics_store         import record_run
+from metrics_store         import record_run, load_latest_run
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -749,6 +750,31 @@ def get_audit():
         return jsonify({"entries": entries[:limit], "total": len(entries)}), 200
     except OSError as e:
         return jsonify({"error": f"Could not read audit log: {e}"}), 500
+
+
+@app.route("/metrics/latest", methods=["GET"])
+def get_metrics_latest():
+    """Return model evaluation metrics for the most recent screening run."""
+    run = load_latest_run()
+    if not run:
+        return jsonify({"error": "No screening runs found. Run the pipeline first."}), 404
+
+    acc = run.get("accuracy_metrics") or {}
+    stats = run.get("stats") or {}
+
+    payload = {
+        "model":            run.get("model_key", ""),
+        "candidates":       run.get("resume_count", 0),
+        "accuracy":         acc.get("accuracy"),
+        "precision":        acc.get("precision"),
+        "recall":           acc.get("recall"),
+        "f1":               acc.get("f1"),
+        "threshold":        acc.get("threshold", 0.60),
+        "mean_similarity":  stats.get("mean"),
+        "std_similarity":   stats.get("std"),
+        "timestamp":        run.get("timestamp"),
+    }
+    return jsonify(payload), 200
 
 
 @app.route("/api/compare", methods=["POST"])

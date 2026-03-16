@@ -132,6 +132,12 @@ def record_run(
             for c in (final_scores or [])
         ],
 
+        # ── Accuracy evaluation metrics (threshold-based classification) ──────
+        "accuracy_metrics": _compute_accuracy_metrics(
+            similarity_results=similarity_results,
+            final_scores=final_scores,
+        ),
+
         **(extra or {}),
     }
 
@@ -148,6 +154,70 @@ def record_run(
         _append_embeddings(run_id, embeddings)
 
     return entry
+
+
+def _compute_accuracy_metrics(
+    similarity_results: list[dict],
+    final_scores: list[dict] | None,
+    threshold: float = 0.60,
+) -> dict:
+    """
+    Compute accuracy, precision, recall and F1 score by treating cosine
+    similarity threshold classification as a binary predictor of pipeline
+    eligibility.
+
+    Ground truth  : candidate is eligible according to the full scoring pipeline.
+    Prediction    : candidate is predicted eligible when similarity >= threshold.
+
+    Returns a dict with keys accuracy, precision, recall, f1, threshold, and
+    sample counts (tp, tn, fp, fn, total).  Returns an empty dict when
+    ground-truth labels are unavailable (no final_scores provided).
+    """
+    if not final_scores:
+        return {}
+
+    # Build a filename → eligible map from the pipeline output
+    eligible_map = {c.get("filename", ""): bool(c.get("eligible", False))
+                    for c in final_scores}
+
+    tp = tn = fp = fn = 0
+    for r in similarity_results:
+        fname = r.get("filename", "")
+        sim   = r.get("similarity_score")
+        if sim is None or fname not in eligible_map:
+            continue
+        predicted_pos = sim >= threshold
+        actual_pos    = eligible_map[fname]
+
+        if predicted_pos and actual_pos:
+            tp += 1
+        elif not predicted_pos and not actual_pos:
+            tn += 1
+        elif predicted_pos and not actual_pos:
+            fp += 1
+        else:
+            fn += 1
+
+    total = tp + tn + fp + fn
+    if total == 0:
+        return {}
+
+    accuracy  = round((tp + tn) / total, 4)
+    precision = round(tp / (tp + fp), 4) if (tp + fp) > 0 else None
+    recall    = round(tp / (tp + fn), 4) if (tp + fn) > 0 else None
+    f1_num = 2 * (precision or 0.0) * (recall or 0.0)
+    f1_den = (precision or 0.0) + (recall or 0.0)
+    f1     = round(f1_num / f1_den, 4) if f1_den > 0 else None
+
+    return {
+        "threshold": threshold,
+        "accuracy":  accuracy,
+        "precision": precision,
+        "recall":    recall,
+        "f1":        f1,
+        "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        "total": total,
+    }
 
 
 def _describe(values: list[float]) -> dict:
@@ -415,6 +485,23 @@ def _print_run_detail(run: dict):
                 f"{_fmt_pct(c.get('finalScore')):>6}  "
                 f"{'Yes' if c.get('eligible') else 'No'}"
             )
+
+    # ── Accuracy evaluation metrics ───────────────────────────────────────────
+    acc_metrics = run.get("accuracy_metrics", {})
+    if acc_metrics:
+        def _fmt_metric(v):
+            return f"{v:.2f}" if v is not None else "—"
+
+        print(f"\n  Model Evaluation Metrics  (threshold={acc_metrics.get('threshold', 0.60):.2f})")
+        print(f"  {'Model':<12}: {run.get('model_key', '?')}")
+        print(f"  {'Candidates':<12}: {run.get('resume_count', '?')}")
+        print(f"  {'Accuracy':<12}: {_fmt_metric(acc_metrics.get('accuracy'))}")
+        print(f"  {'Precision':<12}: {_fmt_metric(acc_metrics.get('precision'))}")
+        print(f"  {'Recall':<12}: {_fmt_metric(acc_metrics.get('recall'))}")
+        print(f"  {'F1 Score':<12}: {_fmt_metric(acc_metrics.get('f1'))}")
+        print(f"  TP={acc_metrics.get('tp',0)}  TN={acc_metrics.get('tn',0)}  "
+              f"FP={acc_metrics.get('fp',0)}  FN={acc_metrics.get('fn',0)}  "
+              f"(n={acc_metrics.get('total',0)})")
 
     print(f"\n{sep}")
 

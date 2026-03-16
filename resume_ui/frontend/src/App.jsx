@@ -1500,8 +1500,16 @@ const LiquidTabBar = ({ sections, active, onChange }) => (
 );
 
 // ─── ANALYTICS VIEW ───────────────────────────────────────────────────────────
-const AnalyticsView = ({ results, isMobile, onNav }) => {
+const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
     const [tab, setTab] = useState("overview");
+    const [evalMetrics, setEvalMetrics] = useState(null);
+
+    useEffect(() => {
+        fetch(`${BASE}/metrics/latest`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data && !data.error) setEvalMetrics(data); })
+            .catch(err => console.error("[AnalyticsView] Failed to load /metrics/latest:", err));
+    }, [results]);
 
     if (!results || results.length === 0)
         return <EmptyState icon={BarChart2} title="No analytics data" sub="Run the screening pipeline first." />;
@@ -1642,6 +1650,61 @@ const AnalyticsView = ({ results, isMobile, onNav }) => {
                             ))}
                         </div>
                     </FieldCard>
+
+                    {/* Model Evaluation Metrics */}
+                    {evalMetrics && (!activeModel || evalMetrics.model === activeModel) && (
+                        <FieldCard label="Model Evaluation Metrics" dot={C.teal} xtra={{ padding:"30px 14px 16px" }}>
+                            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                                {/* Model badge row */}
+                                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+                                    <span style={{ fontSize:10, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:".06em" }}>Model</span>
+                                    <span style={{ fontSize:11, fontWeight:800, color:C.teal, background:`${C.teal}12`, border:`1px solid ${C.teal}28`, borderRadius:6, padding:"1px 9px" }}>
+                                        {evalMetrics.model || "—"}
+                                    </span>
+                                    <span style={{ fontSize:9, color:C.muted }}>
+                                        {evalMetrics.candidates} candidates · threshold {Math.round((evalMetrics.threshold||0.60)*100)}%
+                                    </span>
+                                </div>
+                                {/* Metric chips grid */}
+                                <div style={{ display:"grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap:10 }}>
+                                    {[
+                                        { label:"Accuracy",  value: evalMetrics.accuracy,  color: C.teal  },
+                                        { label:"Precision", value: evalMetrics.precision, color: C.blue  },
+                                        { label:"Recall",    value: evalMetrics.recall,    color: C.green },
+                                        { label:"F1 Score",  value: evalMetrics.f1,        color: C.amber },
+                                    ].map(({ label, value, color }) => {
+                                        const pct = value != null ? Math.round(value * 100) : null;
+                                        return (
+                                            <div key={label} style={{ textAlign:"center", padding:"14px 8px", borderRadius:12, background:`${color}08`, border:`1px solid ${color}22`, position:"relative", overflow:"hidden" }}>
+                                                <div style={{ position:"absolute", top:0, left:"20%", right:"20%", height:1, background:`linear-gradient(90deg,transparent,${color}55,transparent)` }} />
+                                                <div style={{ fontSize:22, fontWeight:900, color, fontVariantNumeric:"tabular-nums", lineHeight:1 }}>
+                                                    {pct != null ? `${pct}%` : "—"}
+                                                </div>
+                                                <div style={{ fontSize:10, fontWeight:600, color:C.text, marginTop:5 }}>{label}</div>
+                                                {pct != null && <SoftBar pct={pct} color={color} h={3} />}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                {/* Similarity stats row */}
+                                {(evalMetrics.mean_similarity != null || evalMetrics.std_similarity != null) && (
+                                    <div style={{ display:"flex", gap:12, marginTop:2, padding:"8px 10px", borderRadius:9, background:C.inputBg, border:`1px solid ${C.border}` }}>
+                                        <div style={{ fontSize:9, color:C.muted, fontWeight:700, textTransform:"uppercase", letterSpacing:".06em", alignSelf:"center" }}>Similarity</div>
+                                        {evalMetrics.mean_similarity != null && (
+                                            <div style={{ fontSize:11, color:C.cardText }}>
+                                                mean <span style={{fontWeight:800,color:C.text}}>{Math.round(evalMetrics.mean_similarity*100)}%</span>
+                                            </div>
+                                        )}
+                                        {evalMetrics.std_similarity != null && (
+                                            <div style={{ fontSize:11, color:C.cardText }}>
+                                                std <span style={{fontWeight:800,color:C.text}}>{Math.round(evalMetrics.std_similarity*100)}%</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </FieldCard>
+                    )}
 
                     {/* Score Bands — full width horizontal strip, matches score distribution width */}
                     <FieldCard label="Score Bands" dot={C.amber} xtra={{ padding:"30px 14px 16px" }}>
@@ -2247,7 +2310,7 @@ export default function App() {
         processing: <ProcessingView config={screeningConfig} onDone={handleProcessingDone} />,
         config: <JobConfigView />,
         candidates: <CandidatesView results={results} onNav={go} isMobile={isMobile} />,
-        analytics: <AnalyticsView results={results} isMobile={isMobile} onNav={go} />,
+        analytics: <AnalyticsView results={results} isMobile={isMobile} onNav={go} activeModel={activeModel} />,
     };
 
     // Sidebar content (shared between desktop sticky + mobile drawer)
