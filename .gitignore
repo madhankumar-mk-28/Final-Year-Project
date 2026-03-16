@@ -4,3 +4,4 @@ Resumes/
 results.csv
 last_results.json
 .DS_Store
+__pycache__/
