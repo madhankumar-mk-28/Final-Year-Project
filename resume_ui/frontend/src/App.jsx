@@ -1514,8 +1514,9 @@ const ModelEvaluationMetricsCard = ({ activeModel }) => {
             .then(r => r.json())
             .then(json => {
                 if (!cancelled) {
-                    if (json.error) { setError(json.error); setData(null); }
-                    else            { setData(json); }
+                    if (json.available === false) { setData(null); setError(null); }
+                    else if (json.error)          { setError(json.error); setData(null); }
+                    else                          { setData(json); }
                     setLoading(false);
                 }
             })
@@ -1555,6 +1556,18 @@ const ModelEvaluationMetricsCard = ({ activeModel }) => {
                 <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 0", color:"#ef4444", fontSize:12 }}>
                     <AlertCircle size={15} />
                     {error}
+                </div>
+            </FieldCard>
+        );
+    }
+
+    // No data yet state
+    if (!data) {
+        return (
+            <FieldCard label="Model Evaluation Metrics" dot={C.muted}>
+                <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 0", color:C.muted, fontSize:12 }}>
+                    <AlertCircle size={15} />
+                    No evaluation data yet — run the screening pipeline to generate metrics.
                 </div>
             </FieldCard>
         );

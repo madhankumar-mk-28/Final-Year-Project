@@ -816,12 +816,13 @@ def get_metrics_latest():
     """Return evaluation metrics for the most recent screening run."""
     run = load_latest_run()
     if not run:
-        return jsonify({"error": "No screening runs found", "status": 404}), 404
+        return jsonify({"available": False}), 200
 
     ev    = run.get("evaluation") or {}
     stats = run.get("stats")      or {}
 
     return jsonify({
+        "available":        True,
         "model":            run.get("model_key"),
         "candidate_count":  run.get("resume_count"),
         "threshold":        ev.get("threshold"),
