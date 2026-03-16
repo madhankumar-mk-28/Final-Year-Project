@@ -1500,7 +1500,122 @@ const LiquidTabBar = ({ sections, active, onChange }) => (
 );
 
 // ─── ANALYTICS VIEW ───────────────────────────────────────────────────────────
-const AnalyticsView = ({ results, isMobile, onNav }) => {
+// ─── MODEL EVALUATION METRICS CARD ───────────────────────────────────────────
+const ModelEvaluationMetricsCard = ({ activeModel }) => {
+    const [data,    setData]    = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error,   setError]   = useState(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        setLoading(true);
+        setError(null);
+        fetch(`${BASE}/metrics/latest`)
+            .then(r => r.json())
+            .then(json => {
+                if (!cancelled) {
+                    if (json.error) { setError(json.error); setData(null); }
+                    else            { setData(json); }
+                    setLoading(false);
+                }
+            })
+            .catch(() => {
+                if (!cancelled) { setError("Could not reach the metrics endpoint."); setLoading(false); }
+            });
+        return () => { cancelled = true; };
+    }, [activeModel]);
+
+    const metricColor = v => {
+        if (v == null) return C.sub;
+        return v >= 0.80 ? C.green : v >= 0.60 ? C.amber : "#ef4444";
+    };
+
+    const pct = v => v != null ? `${Math.round(v * 100)}%` : "—";
+
+    // Loading skeleton
+    if (loading) {
+        return (
+            <FieldCard label="Model Evaluation Metrics" dot={C.blue}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginTop:4 }}>
+                    {[...Array(4)].map((_,i) => (
+                        <div key={i} style={{ padding:"16px 12px", borderRadius:12, background:C.inputBg, border:`1px solid ${C.border}`, textAlign:"center" }}>
+                            <div style={{ height:10, borderRadius:6, background:`${C.border}`, marginBottom:10 }} />
+                            <div style={{ height:26, borderRadius:6, background:`${C.border}`, width:"60%", margin:"0 auto" }} />
+                        </div>
+                    ))}
+                </div>
+            </FieldCard>
+        );
+    }
+
+    // Error state
+    if (error) {
+        return (
+            <FieldCard label="Model Evaluation Metrics" dot="#ef4444" xtra={{ border:"1px solid rgba(239,68,68,.2)" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 0", color:"#ef4444", fontSize:12 }}>
+                    <AlertCircle size={15} />
+                    {error}
+                </div>
+            </FieldCard>
+        );
+    }
+
+    const modelInfo = data && MODELS[data.model];
+    const modelColor = modelInfo ? modelInfo.color : C.blue;
+    const showNotice = data && activeModel && data.model !== activeModel;
+
+    const tiles = [
+        { label:"Accuracy",  value: data?.accuracy  },
+        { label:"Precision", value: data?.precision },
+        { label:"Recall",    value: data?.recall    },
+        { label:"F1 Score",  value: data?.f1        },
+    ];
+
+    return (
+        <FieldCard label="Model Evaluation Metrics" dot={C.blue}>
+            {/* Model badge + notice row */}
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8, marginBottom:12 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:9, fontWeight:700, textTransform:"uppercase", letterSpacing:".07em", color:C.muted }}>Model</span>
+                    <span style={{ padding:"2px 10px", borderRadius:20, fontSize:11, fontWeight:700, background:`${modelColor}18`, color:modelColor, border:`1px solid ${modelColor}30` }}>
+                        {data?.model ?? "—"} 🏷
+                    </span>
+                    {data?.threshold != null && (
+                        <span style={{ fontSize:10, color:C.muted }}>threshold: {data.threshold.toFixed(2)}</span>
+                    )}
+                </div>
+                {data?.timestamp && (
+                    <span style={{ fontSize:9, color:C.muted, fontFamily:"monospace" }}>{data.timestamp.slice(0,19)}</span>
+                )}
+            </div>
+
+            {/* Model mismatch notice */}
+            {showNotice && (
+                <div style={{ padding:"8px 12px", borderRadius:9, background:`${C.amber}10`, border:`1px solid ${C.amber}28`, marginBottom:12, fontSize:11, color:C.amber, lineHeight:1.55 }}>
+                    No evaluation data available for <strong>{activeModel}</strong>. Showing latest run (<strong>{data.model}</strong>).
+                </div>
+            )}
+
+            {/* 4-column metric tiles */}
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:10 }}
+                 className="eval-grid">
+                <style>{`@media(min-width:600px){.eval-grid{grid-template-columns:repeat(4,1fr)!important;}}`}</style>
+                {tiles.map(({ label, value }) => {
+                    const col = metricColor(value);
+                    return (
+                        <div key={label} style={{ padding:"16px 12px", borderRadius:12, background:`${col}08`, border:`1px solid ${col}22`, textAlign:"center", position:"relative", overflow:"hidden" }}>
+                            <div style={{ position:"absolute", top:0, left:0, right:0, height:1, background:`linear-gradient(90deg,transparent,${col}55,transparent)` }} />
+                            <div style={{ fontSize:10, fontWeight:700, color:C.muted, marginBottom:8, textTransform:"uppercase", letterSpacing:".06em" }}>{label}</div>
+                            <div style={{ fontSize:26, fontWeight:900, color:col, fontVariantNumeric:"tabular-nums", lineHeight:1 }}>{pct(value)}</div>
+                        </div>
+                    );
+                })}
+            </div>
+        </FieldCard>
+    );
+};
+
+const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
     const [tab, setTab] = useState("overview");
 
     if (!results || results.length === 0)
@@ -1642,6 +1757,9 @@ const AnalyticsView = ({ results, isMobile, onNav }) => {
                             ))}
                         </div>
                     </FieldCard>
+
+                    {/* Model Evaluation Metrics — after Score Distribution */}
+                    <ModelEvaluationMetricsCard activeModel={activeModel} />
 
                     {/* Score Bands — full width horizontal strip, matches score distribution width */}
                     <FieldCard label="Score Bands" dot={C.amber} xtra={{ padding:"30px 14px 16px" }}>
@@ -2247,7 +2365,7 @@ export default function App() {
         processing: <ProcessingView config={screeningConfig} onDone={handleProcessingDone} />,
         config: <JobConfigView />,
         candidates: <CandidatesView results={results} onNav={go} isMobile={isMobile} />,
-        analytics: <AnalyticsView results={results} isMobile={isMobile} onNav={go} />,
+        analytics: <AnalyticsView results={results} isMobile={isMobile} onNav={go} activeModel={activeModel} />,
     };
 
     // Sidebar content (shared between desktop sticky + mobile drawer)
