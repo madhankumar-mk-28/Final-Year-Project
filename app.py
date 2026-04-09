@@ -41,12 +41,7 @@ import numpy as np
 # ── ML pipeline modules ───────────────────────────────────────────────────────
 from resume_parser         import load_resumes_from_folder
 from information_extractor import extract_all
-from semantic_matcher      import (
-    rank_resumes_by_similarity,
-    compute_skill_semantic_matches,
-    MPNET_MODEL, MXBAI_MODEL, ARCTIC_MODEL,
-    ENSEMBLE_WEIGHTS,
-)
+import semantic_matcher
 from scoring_engine        import ScoringConfig, score_candidates
 from metrics_store         import record_run, load_latest_run
 
@@ -78,14 +73,21 @@ MAX_AUDIT_JD_CHARS      = 120                # truncate long job descriptions in
 # Maps short frontend key → full HuggingFace model ID (used by sentence-transformers)
 # "ensemble" is a special key that runs all three models and averages the results.
 VALID_MODELS = {
-    "mpnet":    MPNET_MODEL,    # multi-qa-mpnet-base-dot-v1
-    "mxbai":    MXBAI_MODEL,    # mixedbread-ai/mxbai-embed-large-v1
-    "arctic":   ARCTIC_MODEL,   # Snowflake/snowflake-arctic-embed-m-v1.5
+    "mpnet":    semantic_matcher.MPNET_MODEL,    # multi-qa-mpnet-base-dot-v1
+    "mxbai":    semantic_matcher.MXBAI_MODEL,    # mixedbread-ai/mxbai-embed-large-v1
+    "arctic":   semantic_matcher.ARCTIC_MODEL,   # Snowflake/snowflake-arctic-embed-m-v1.5
     "ensemble": "ensemble",     # weighted average of all three models
 }
 
 # Active model key for the current session
 _active_model_key = "ensemble"
+
+# Ensemble weights for combining multiple embedding models
+ENSEMBLE_WEIGHTS = {
+    "mpnet": 0.4,    # multi-qa-mpnet-base-dot-v1
+    "mxbai": 0.3,    # mixedbread-ai/mxbai-embed-large-v1
+    "arctic": 0.3,   # Snowflake/snowflake-arctic-embed-m-v1.5
+}
 
 # ── Default config ────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
@@ -482,7 +484,7 @@ def screen():
         if model_key == "ensemble":
             logger.info("[Pipeline] Step 3 — Ensemble semantic similarity (all 3 models)...")
             for _m in ENSEMBLE_WEIGHTS:
-                per_model_similarities[_m] = rank_resumes_by_similarity(
+                per_model_similarities[_m] = semantic_matcher.rank_resumes_by_similarity(
                     resume_texts, job_description, model_name=_m
                 )
             # Weighted average (mirrors rank_resumes_ensemble logic)
@@ -498,7 +500,7 @@ def screen():
             similarity_results.sort(key=lambda x: x["similarity_score"], reverse=True)
         else:
             logger.info("[Pipeline] Step 3 — Computing semantic similarity (%s)...", model_name)
-            similarity_results = rank_resumes_by_similarity(
+            similarity_results = semantic_matcher.rank_resumes_by_similarity(
                 resume_texts, job_description, model_name=model_name
             )
         similarity_map = {r["filename"]: r["similarity_score"] for r in similarity_results}
@@ -507,11 +509,11 @@ def screen():
         # Use embeddings to find required skills that semantically match
         # each candidate's extracted skills (catches near-synonyms not in the
         # static alias table, e.g. "collaboration" → "adaptability").
-        skill_model = MPNET_MODEL if model_key == "ensemble" else model_name
+        skill_model = semantic_matcher.MPNET_MODEL if model_key == "ensemble" else model_name
         logger.info("[Pipeline] Step 3b — Semantic skill matching (%s)...", skill_model)
         semantic_skill_map: dict = {}
         for fname, info in extracted.items():
-            semantic_skill_map[fname] = compute_skill_semantic_matches(
+            semantic_skill_map[fname] = semantic_matcher.compute_skill_semantic_matches(
                 info.get("skills", []),
                 required_skills,
                 model_name=skill_model,
