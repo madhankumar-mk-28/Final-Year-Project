@@ -1,49 +1,10 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Python
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-.conda/
-.env
-venv/
-env/
-
-# App generated files
 uploads/
-last_results.json
-audit.jsonl
-metrics_log.jsonl
-metrics_log.jsonl
-results.csv
+results/
+*.jsonl
 embeddings_store.json
-
-# Build output
+.env
+node_modules/
 dist/
-dist-ssr/
-
-# HuggingFace model cache (large, re-downloads automatically)
-.cache/
