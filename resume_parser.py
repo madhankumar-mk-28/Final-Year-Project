@@ -1,13 +1,3 @@
-"""
-resume_parser.py
-----------------
-Extracts clean text from PDF resumes.
-
-Strategy:
-  1. pdfplumber  — best for text-layer PDFs (primary)
-  2. PyMuPDF     — fallback for scanned or complex-layout PDFs
-"""
-
 import os
 import re
 import logging
@@ -20,44 +10,60 @@ try:
 except ImportError:
     _FITZ_AVAILABLE = False
 
-# ── Logger ────────────────────────────────────────────────────────────────────
 logger = logging.getLogger("resume_parser")
+
+_MAX_CHARS = 500_000  # Hard cap applied per-page — prevents decompression-bomb PDFs from exhausting RAM
 
 
 def _clean(raw: str) -> str:
-    """Normalise whitespace and line endings."""
+    """Normalise whitespace and collapse excessive blank lines."""
     raw = re.sub(r"\r\n", "\n", raw)
     raw = re.sub(r"\r", "\n", raw)
-    raw = re.sub(r"[ \t]+", " ", raw)          # collapse horizontal whitespace
-    raw = re.sub(r"\n{3,}", "\n\n", raw)        # max 2 blank lines
+    raw = re.sub(r"[ \t]+", " ", raw)        # collapse horizontal whitespace
+    raw = re.sub(r"\n{3,}", "\n\n", raw)     # max 2 consecutive blank lines
     return raw.strip()
 
 
 def _extract_pdfplumber(pdf_path: str) -> str:
-    """Primary extractor: pdfplumber (best for text-layer PDFs)."""
+    """Extract text page-by-page via pdfplumber, stopping at _MAX_CHARS."""
     parts = []
+    total = 0
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text = page.extract_text(x_tolerance=3, y_tolerance=3)
-            if text:
-                parts.append(text)
+            text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+            remaining = _MAX_CHARS - total
+            if remaining <= 0:
+                break
+            chunk = text[:remaining]
+            if chunk:
+                parts.append(chunk)
+            total += len(chunk)
     return _clean("\n".join(parts))
 
 
 def _extract_pymupdf(pdf_path: str) -> str:
-    """Fallback extractor: PyMuPDF (handles tables, scanned, rotated pages)."""
+    """Extract text via PyMuPDF — handles scanned, rotated, and complex-layout PDFs."""
     parts = []
+    total = 0
     doc = fitz.open(pdf_path)
-    for page in doc:
-        text = page.get_text("text")
-        if text:
-            parts.append(text)
-    doc.close()
+    try:
+        for page_index in range(len(doc)):
+            page = doc.load_page(page_index)
+            text = page.get_text("text") or ""
+            remaining = _MAX_CHARS - total
+            if remaining <= 0:
+                break
+            chunk = text[:remaining]
+            if chunk:
+                parts.append(chunk)
+            total += len(chunk)
+    finally:
+        doc.close()
     return _clean("\n".join(parts))
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract and clean all text from a PDF, falling back to PyMuPDF if pdfplumber fails."""
+    """Extract and clean all text from a PDF, falling back to PyMuPDF if pdfplumber yields < 100 chars."""
     fname = os.path.basename(pdf_path)
 
     if not os.path.isfile(pdf_path):
@@ -66,7 +72,6 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 
     text = ""
 
-    # ── Primary: pdfplumber ───────────────────────────────────────────────────
     try:
         text = _extract_pdfplumber(pdf_path)
         logger.info("[resume_parser] pdfplumber → %s (%d chars)", fname, len(text))
@@ -76,7 +81,6 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     except Exception as e:
         logger.warning("[resume_parser] pdfplumber failed for %s: %s", fname, e)
 
-    # ── Fallback: PyMuPDF (if primary gave nothing or <100 chars) ─────────────
     if len(text) < 100 and _FITZ_AVAILABLE:
         logger.info("[resume_parser] Falling back to PyMuPDF for %s", fname)
         try:
@@ -89,6 +93,12 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 
     if not text:
         logger.error("[resume_parser] Could not extract any text from %s", fname)
+        return ""
+
+    if len(text) > _MAX_CHARS:  # Safety net if a page somehow bypassed the per-page cap
+        logger.warning("[resume_parser] Post-parse cap hit for %s (%d → %d chars)",
+                       fname, len(text), _MAX_CHARS)
+        text = text[:_MAX_CHARS]
 
     return text
 

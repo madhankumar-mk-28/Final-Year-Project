@@ -1,24 +1,21 @@
+# ── PyTorch CPU-only build (saves ~1.5 GB vs CUDA wheel — critical for Render free tier)
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-# Web framework
-flask>=2.3,<4.0
-flask-cors>=4.0
-werkzeug>=2.3
+# ── Web framework
+flask>=3.0.0,<4.0
+flask-cors>=4.0.0,<5.0
+gunicorn>=21.2.0,<22.0
 
-# PDF parsing
-pdfplumber>=0.10
-pymupdf>=1.23
+# ── ML / embeddings
+torch>=2.2.0
+sentence-transformers>=3.0.0,<4.0
 
-# NLP & ML
-spacy>=3.7
-sentence-transformers>=2.7
-transformers>=4.40
-torch>=2.1
-numpy>=1.26
-scikit-learn>=1.4
+# ── PDF parsing
+pdfplumber>=0.11.0,<1.0
+PyMuPDF>=1.24.0,<2.0
 
-# Utilities
-pandas>=2.1
+# ── Numerics (sentence-transformers pulls numpy transitively, pin to avoid ABI mismatch)
+numpy>=1.26.0,<3.0
 
-# spaCy English model (installs directly — no separate download step needed)
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# ── Werkzeug is a flask dep; pin to avoid breaking changes
+Werkzeug>=3.0.0,<4.0

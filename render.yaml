@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: resume-screening-api
+    runtime: python
+    # Root of the repo where app.py lives
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --timeout 180 --bind 0.0.0.0:$PORT --log-level info
+    plan: free           # change to "starter" for persistent disk + no sleep
+    autoDeploy: true
+
+    envVars:
+      - key: CORS_ORIGINS
+        # Replace with your actual Vercel URL after first deploy
+        value: https://your-app.vercel.app
+      - key: PYTHON_VERSION
+        value: 3.11.9
+
+    # Uncomment to add a persistent disk (paid plans only).
+    # Required if you want Hugging Face model cache to survive deploys.
+    # disk:
+    #   name: hf-model-cache
+    #   mountPath: /opt/render/project/.cache
+    #   sizeGB: 5
