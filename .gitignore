@@ -1,8 +1,10 @@
-node_modules/
-build/
-Resumes/
-results.csv
-last_results.json
-.DS_Store
+.venv/
 __pycache__/
 *.pyc
+uploads/
+results/
+*.jsonl
+embeddings_store.json
+node_modules/
+dist/
+.env
