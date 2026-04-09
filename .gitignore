@@ -1,4 +1,6 @@
 .venv/
+Resumes/
+*.DS_Store
 __pycache__/
 *.pyc
 uploads/
@@ -8,3 +10,4 @@ embeddings_store.json
 node_modules/
 dist/
 .env
+
