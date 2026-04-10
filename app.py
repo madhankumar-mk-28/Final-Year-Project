@@ -1,51 +1,43 @@
 """
-app.py
-------
-Flask backend for the AI Resume Screening System.
-Connects the React frontend to the Python ML pipeline.
-
-Endpoints:
-    GET  /api/health          → server health check
-    POST /api/upload-resumes  → save uploaded PDFs to uploads/
-    POST /api/screen          → run the full ML pipeline
-    GET  /api/results         → return latest ranked results
-    GET  /api/candidate/<id>  → return a single candidate by ID
-    GET  /api/config          → return current config.json
-    POST /api/config          → save updated config.json
-    GET  /api/model           → return currently active model
-    POST /api/model           → switch active model
-    POST /api/clear           → clear all uploads and results
-    GET  /api/export          → download latest results as CSV
-    GET  /api/audit           → return recent screening audit log
-
-Run:
-    python app.py
-    → http://localhost:5001
+app.py — Flask backend for the AI Resume Screening System.
+Endpoints: /api/health, /api/upload-resumes, /api/screen, /api/result/<id>, /api/config, /api/model, /api/clear
+Run: python app.py  →  http://localhost:5001
 """
+from __future__ import annotations
 
-import csv
+
+import atexit
 import hashlib
-import io
 import json
+import re
+import shutil
+import time
+import uuid
 import logging
 import os
-import traceback
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_from_directory, Response
+import numpy as np
+from flask import Flask, g, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-import numpy as np
 
-# ── ML pipeline modules ───────────────────────────────────────────────────────
 from resume_parser         import load_resumes_from_folder
 from information_extractor import extract_all
-import semantic_matcher
+from semantic_matcher      import (
+    rank_resumes_by_similarity,
+    MPNET_MODEL, MXBAI_MODEL, ARCTIC_MODEL,
+    SKILL_THRESHOLD_BY_MODEL, SKILL_SEMANTIC_THRESHOLD,
+    _get_model as _sm_get_model,
+)
 from scoring_engine        import ScoringConfig, score_candidates
-from metrics_store         import record_run, load_latest_run
+import metrics_store
+from audit_logger          import write_audit as _write_audit, log_failure as _log_failure, normalize_skill
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)-7s] %(name)s: %(message)s",
@@ -53,47 +45,71 @@ logging.basicConfig(
 )
 logger = logging.getLogger("app")
 
-# ── Flask setup ───────────────────────────────────────────────────────────────
+# Flask app + CORS
 app = Flask(__name__, static_folder="frontend/build", static_url_path="/")
-CORS(app)   # Allow React dev server (port 3000) to call this API (port 5001)
 
-# ── File paths ────────────────────────────────────────────────────────────────
-UPLOAD_FOLDER = Path("uploads")
-RESULTS_FILE  = Path("last_results.json")
+_cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(",")
+CORS(
+    app,
+    origins=_cors_origins,
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Requested-With"],
+    supports_credentials=False,
+    max_age=600,
+)
+
+# Directory paths
+UPLOAD_BASE   = Path("uploads")
+RESULTS_DIR   = Path("results")
 CONFIG_FILE   = Path("config.json")
-AUDIT_FILE    = Path("audit.jsonl")
 
-UPLOAD_FOLDER.mkdir(exist_ok=True)
+UPLOAD_BASE.mkdir(exist_ok=True)
+RESULTS_DIR.mkdir(exist_ok=True)
 
-# ── Upload limits ─────────────────────────────────────────────────────────────
-MAX_FILE_BYTES          = 10 * 1024 * 1024   # 10 MB per file
-MAX_AUDIT_JD_CHARS      = 120                # truncate long job descriptions in the audit log
+# Input validation
+_SESSION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
-# ── Supported embedding models ────────────────────────────────────────────────
-# Maps short frontend key → full HuggingFace model ID (used by sentence-transformers)
-# "ensemble" is a special key that runs all three models and averages the results.
+# Hard limits
+MAX_FILE_BYTES          = 10 * 1024 * 1024   # 10 MB per PDF
+MAX_AUDIT_JD_CHARS      = 120                # truncate JD in audit entries
+MAX_JSONL_ENTRIES       = 500                # max lines per JSONL log
+MAX_CONFIG_BYTES        = 8192               # max POST /api/config payload
+MAX_JD_CHARS            = 4000               # max job description length
+MAX_FILES_PER_SESSION   = 200                # max PDFs per upload session
+MAX_REQUIRED_SKILLS     = 50                 # max skills list length
+ALLOWED_CONFIG_KEYS     = {"job_description", "required_skills", "model", "scoring"}
+
+# Concurrency and rate-limiting tunables
+MAX_CONCURRENT_SCREENINGS = 3      # beyond this POST /api/screen returns 503
+MIN_FREE_DISK_MB          = 200    # below this POST /api/upload-resumes returns 503
+RATE_LIMIT_WINDOW_S       = 60     # sliding window for per-IP rate limiting
+RATE_LIMIT_MAX_REQUESTS   = 30     # max requests per IP per window
+SLOW_REQUEST_THRESHOLD_S  = 20.0   # log WARNING if request exceeds this duration
+TASK_TTL_S                = 3600   # async task expiry (1 hour)
+
+# Allowed embedding models
 VALID_MODELS = {
-    "mpnet":    semantic_matcher.MPNET_MODEL,    # multi-qa-mpnet-base-dot-v1
-    "mxbai":    semantic_matcher.MXBAI_MODEL,    # mixedbread-ai/mxbai-embed-large-v1
-    "arctic":   semantic_matcher.ARCTIC_MODEL,   # Snowflake/snowflake-arctic-embed-m-v1.5
-    "ensemble": "ensemble",     # weighted average of all three models
+    "mpnet":  MPNET_MODEL,
+    "mxbai":  MXBAI_MODEL,
+    "arctic": ARCTIC_MODEL,
 }
 
-# Active model key for the current session
-_active_model_key = "ensemble"
+# Trusted reverse-proxy IPs (only these may set X-Forwarded-For)
+_env_proxies = os.environ.get("TRUSTED_PROXIES", "127.0.0.1,::1,10.0.0.0/8")
+TRUSTED_PROXIES: set = {p.strip() for p in _env_proxies.split(",") if p.strip()}
 
-# Ensemble weights for combining multiple embedding models
-ENSEMBLE_WEIGHTS = {
-    "mpnet": 0.4,    # multi-qa-mpnet-base-dot-v1
-    "mxbai": 0.3,    # mixedbread-ai/mxbai-embed-large-v1
-    "arctic": 0.3,   # Snowflake/snowflake-arctic-embed-m-v1.5
-}
+# Scoring fields accepted from the request body
+_SCORING_FIELDS = frozenset({
+    "skill_weight", "semantic_weight", "exp_weight",
+    "min_experience_years", "required_education",
+    "top_n", "min_final_score",
+})
 
-# ── Default config ────────────────────────────────────────────────────────────
+# Default config (used when config.json is absent or corrupt)
 DEFAULT_CONFIG = {
     "job_description": "",
     "required_skills": [],
-    "model": "ensemble",
+    "model": "mpnet",
     "scoring": {
         "skill_weight":         0.55,
         "semantic_weight":      0.45,
@@ -105,8 +121,292 @@ DEFAULT_CONFIG = {
 }
 
 
+# Request timing hooks — log slow requests (>20s) as WARNING, others as DEBUG
+
+@app.before_request
+def _record_request_start():
+    g.req_start = time.time()
+
+
+@app.after_request
+def _log_request_duration(response):
+    duration = time.time() - getattr(g, "req_start", time.time())
+    if duration >= SLOW_REQUEST_THRESHOLD_S:
+        logger.warning(
+            "[Timing] SLOW %s %s → %d — %.2fs",
+            request.method, request.path, response.status_code, duration,
+        )
+    else:
+        logger.debug(
+            "[Timing] %s %s → %d — %.3fs",
+            request.method, request.path, response.status_code, duration,
+        )
+    return response
+
+
+# Per-IP rate limiting — sliding window, in-memory, no external dependencies
+
+_rate_store: dict[str, list[float]] = {}
+_rate_lock  = threading.Lock()
+
+
+def _get_client_ip() -> str:
+    """Return real client IP; only trust X-Forwarded-For from TRUSTED_PROXIES."""
+    remote = request.remote_addr or "unknown"
+    if remote in TRUSTED_PROXIES:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return remote
+
+
+def _is_rate_limited(ip: str) -> bool:
+    """Return True if this IP has exceeded the request quota in the current window."""
+    now    = time.time()
+    cutoff = now - RATE_LIMIT_WINDOW_S
+    with _rate_lock:
+        ts = [t for t in _rate_store.get(ip, []) if t > cutoff]
+        if len(ts) >= RATE_LIMIT_MAX_REQUESTS:
+            _rate_store[ip] = ts
+            return True
+        ts.append(now)
+        _rate_store[ip] = ts
+        return False
+
+
+def _prune_rate_store():
+    """Remove inactive IPs from the rate-limit store — called hourly by cleanup worker."""
+    cutoff = time.time() - RATE_LIMIT_WINDOW_S
+    with _rate_lock:
+        stale = [ip for ip, ts in _rate_store.items() if not any(t > cutoff for t in ts)]
+        for ip in stale:
+            del _rate_store[ip]
+    if stale:
+        logger.debug("[RateLimit] Pruned %d stale IP entries.", len(stale))
+
+
+# Async task store — each /api/screen call creates a task_id and returns 202
+
+_task_store: dict[str, dict] = {}
+_task_lock  = threading.Lock()
+_screening_executor = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_SCREENINGS,
+    thread_name_prefix="screener",
+)
+
+
+def _task_set(task_id: str, data: dict):
+    with _task_lock:
+        _task_store[task_id] = data
+
+
+def _task_get(task_id: str) -> dict | None:
+    with _task_lock:
+        return _task_store.get(task_id)
+
+
+def _task_update(task_id: str, patch: dict) -> None:
+    """Atomic read-modify-write — prevents TOCTOU race between cleanup and worker."""
+    with _task_lock:
+        existing = _task_store.get(task_id, {})
+        _task_store[task_id] = {**existing, **patch}
+
+
+def _prune_tasks():
+    """Remove tasks older than TASK_TTL_S — called hourly by cleanup worker."""
+    cutoff = time.time() - TASK_TTL_S
+    with _task_lock:
+        stale = [tid for tid, t in _task_store.items()
+                 if t.get("created_at", 0) < cutoff]
+        for tid in stale:
+            del _task_store[tid]
+    if stale:
+        logger.debug("[Tasks] Pruned %d stale task(s).", len(stale))
+
+
+# Concurrent-screening counter — guards against burst overload
+
+_active_screenings      = 0
+_active_screenings_lock = threading.Lock()
+
+
+# Thread-safe in-memory metrics — exposed via GET /api/health
+
+_metrics: dict[str, int] = {
+    "total_upload_requests":    0,
+    "total_files_saved":        0,
+    "total_files_rejected":     0,
+    "total_screen_requests":    0,
+    "total_resumes_processed":  0,
+    "total_parse_failures":     0,
+    "total_screen_errors":      0,
+    "total_rate_limited":       0,
+    "total_overload_rejected":  0,
+}
+_metrics_lock = threading.Lock()
+
+
+def _inc(key: str, amount: int = 1):
+    with _metrics_lock:
+        _metrics[key] = _metrics.get(key, 0) + amount
+
+
+def _get_metrics() -> dict:
+    with _metrics_lock:
+        return dict(_metrics)
+
+
+# Disk space guard — blocks uploads when free disk falls below MIN_FREE_DISK_MB
+
+def _disk_space_ok() -> bool:
+    """Return False when free disk < MIN_FREE_DISK_MB. Fails open on stat error."""
+    try:
+        return shutil.disk_usage(UPLOAD_BASE).free / (1024 * 1024) >= MIN_FREE_DISK_MB
+    except OSError:
+        return True
+
+
+# In-memory PDF count — kept accurate by upload / cleanup / clear operations
+
+_pdf_count      = 0
+_pdf_count_lock = threading.Lock()
+
+
+def _pdf_count_init():
+    global _pdf_count
+    with _pdf_count_lock:
+        _pdf_count = sum(1 for _ in UPLOAD_BASE.rglob("*.pdf"))
+
+
+def _pdf_count_add(n: int = 1):
+    global _pdf_count
+    with _pdf_count_lock:
+        _pdf_count += n
+
+
+def _pdf_count_sub(n: int = 1):
+    global _pdf_count
+    with _pdf_count_lock:
+        _pdf_count = max(0, _pdf_count - n)
+
+
+# Stale session cleanup — removes upload folders older than max_age_seconds
+
+# Defined here — called by cleanup_stale_sessions which runs at module init
+def _session_results_file(session_id: str) -> Path:
+    return RESULTS_DIR / f"{session_id}.json"
+
+
+def cleanup_stale_sessions(max_age_seconds: int = 3600) -> int:
+    """Remove session folders and result files older than max_age_seconds. Returns count removed."""
+    now, cleaned, errors = time.time(), 0, 0
+    logger.info("[Cleanup] Scanning for stale sessions (max_age=%ds).", max_age_seconds)
+
+    try:
+        entries = list(UPLOAD_BASE.iterdir())
+    except OSError as e:
+        logger.error("[Cleanup] Cannot scan uploads directory: %s", e)
+        return 0
+
+    for d in entries:
+        if not d.is_dir():
+            continue
+        try:
+            # Use newest mtime across dir + all files inside — keeps recently-screened sessions alive
+            dir_mtime   = d.stat().st_mtime
+            file_times  = [f.stat().st_mtime for f in d.iterdir() if f.is_file()]
+            effective   = max([dir_mtime] + file_times) if file_times else dir_mtime
+            age         = now - effective
+        except OSError:
+            continue
+
+        if age <= max_age_seconds:
+            continue
+
+        session_id = d.name
+        try:
+            pdf_count = sum(1 for _ in d.glob("*.pdf"))
+            shutil.rmtree(d, ignore_errors=True)
+            _pdf_count_sub(pdf_count)
+            results_file = _session_results_file(session_id)
+            if results_file.exists():
+                results_file.unlink(missing_ok=True)
+            cleaned += 1
+        except Exception as e:
+            errors += 1
+            logger.warning("[Cleanup] Failed to remove session %s: %s", session_id, e)
+
+    logger.info("[Cleanup] Done — %d session(s) removed, %d error(s).", cleaned, errors)
+    return cleaned
+
+
+def _cleanup_worker():
+    """Background daemon — hourly cleanup, rate-store pruning, task pruning. Logs heartbeat each cycle."""
+    logger.info("[Cleanup] Background worker started (pid=%d).", os.getpid())
+    while True:
+        time.sleep(3600)
+        logger.info("[Cleanup] Worker heartbeat — running hourly tasks.")
+        try:
+            _prune_rate_store()
+            _prune_tasks()
+            cleanup_stale_sessions(max_age_seconds=7200)
+        except Exception as exc:
+            logger.error("[Cleanup] Unexpected error in worker: %s", exc, exc_info=True)
+
+
+# Startup init — guarded by Event so it runs exactly once per process
+
+_startup_done = threading.Event()
+
+
+def _startup_init():
+    if _startup_done.is_set():
+        return
+    _startup_done.set()
+
+    logger.info("[Startup] Initialising (pid=%d).", os.getpid())
+
+    _pdf_count_init()
+    logger.info("[Startup] PDF count from disk: %d.", _pdf_count)
+
+    removed = cleanup_stale_sessions(max_age_seconds=7200)
+    logger.info("[Startup] Startup cleanup — %d session(s) removed.", removed)
+
+    # Pre-load the default model so the first /api/screen call is not cold
+    try:
+        logger.info("[Startup] Pre-loading default model '%s'...", VALID_MODELS["mpnet"])
+        _sm_get_model(VALID_MODELS["mpnet"])
+        logger.info("[Startup] Default model ready.")
+    except Exception as exc:
+        logger.warning("[Startup] Model warmup skipped: %s", exc)
+
+    # Register executor shutdown on SIGTERM/atexit — prevents stranded _active_screenings counter
+    atexit.register(lambda: _screening_executor.shutdown(wait=False, cancel_futures=True))
+
+    t = threading.Thread(target=_cleanup_worker, daemon=True, name="cleanup-worker")
+    t.start()
+    logger.info("[Startup] Background cleanup thread started.")
+
+
+# Module-level call — runs for Gunicorn workers and direct python invocations
+_startup_init()
+
+
+# Core helpers
+
+def _validate_session_id(session_id: str) -> bool:
+    return bool(_SESSION_ID_RE.fullmatch(session_id))
+
+
+def _safe_iterdir(path: Path):
+    """Yield directory entries, ignoring OSError if the directory is deleted mid-iteration."""
+    try:
+        yield from path.iterdir()
+    except OSError:
+        return
+
+
 def load_config() -> dict:
-    """Load config.json from disk, or return defaults if missing or malformed."""
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE) as f:
@@ -117,18 +417,19 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    """Write config dict to config.json."""
-    with open(CONFIG_FILE, "w") as f:
+    """Atomic write via temp file — readers always see a complete JSON file."""
+    tmp = CONFIG_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
         json.dump(cfg, f, indent=2)
+    tmp.replace(CONFIG_FILE)
 
 
 def allowed_file(filename: str) -> bool:
-    """Only PDF files are accepted."""
     return filename.lower().endswith(".pdf")
 
 
 def _file_sha256(file_storage) -> str:
-    """Return the SHA-256 hex digest of an uploaded file's contents."""
+    """Compute SHA-256 of an uploaded file stream; resets stream position."""
     h = hashlib.sha256()
     file_storage.stream.seek(0)
     for chunk in iter(lambda: file_storage.stream.read(8192), b""):
@@ -137,29 +438,31 @@ def _file_sha256(file_storage) -> str:
     return h.hexdigest()
 
 
-def _existing_hashes() -> dict:
-    """Build a map of { sha256_hex: filename } for all PDFs already in uploads/."""
+def _existing_hashes(folder: Path) -> dict:
+    """Build a {sha256: filename} map for all PDFs already in the session folder."""
     hashes = {}
-    for pdf in UPLOAD_FOLDER.glob("*.pdf"):
+    for pdf in folder.glob("*.pdf"):
         try:
-            h = hashlib.sha256(pdf.read_bytes()).hexdigest()
-            hashes[h] = pdf.name
+            h = hashlib.sha256()
+            with open(pdf, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            hashes[h.hexdigest()] = pdf.name
         except OSError:
             pass
     return hashes
 
 
-def serialize_results(results: list) -> list:
-    """Convert scoring engine output into JSON-safe dicts matching the React frontend shape."""
+def serialize_results(results: list, skills_configured: bool = True) -> list:
+    """Convert scoring engine output to JSON-safe dicts for the React frontend."""
     serialized = []
-    rank = 1
-    for r in results:
+    for rank, r in enumerate(results, start=1):
         serialized.append({
             "id":               rank,
-            "rank":             rank,  # always set — UI uses eligible flag for Rejected badge
+            "rank":             rank,
             "name":             r.get("name", "Unknown"),
-            "email":            r.get("email", ""),
-            "phone":            r.get("phone", ""),
+            "email":            r.get("email") or "N/A",
+            "phone":            r.get("phone") or "N/A",
             "filename":         r.get("filename", ""),
             "experience":       r.get("experience_years", 0.0),
             "education":        r.get("education", []),
@@ -172,73 +475,65 @@ def serialize_results(results: list) -> list:
             "finalScore":       r.get("final_score", 0.0),
             "eligible":         r.get("eligible", False),
             "rejection_reason": r.get("rejection_reason", ""),
+            "rejection_code":   r.get("rejection_code", ""),   # stable enum for frontend switch
             "status":           "Shortlisted" if r.get("eligible") else "Rejected",
+            "band":             r.get("band", ""),
+            "dynamic_threshold": r.get("dynamic_threshold", 0.5),
+            "fn_recovered":      r.get("fn_recovered", False),
+            "skills_configured": skills_configured,
         })
-        rank += 1
     return serialized
 
 
-def _write_audit(entry: dict):
-    """Append a single screening audit record as a JSON line to audit.jsonl."""
-    try:
-        with open(AUDIT_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError as e:
-        logger.warning("[Audit] Could not write audit log: %s", e)
+def _write_results(results_file: Path, serialized: list):
+    """Atomic results write — readers always see a complete file."""
+    tmp = results_file.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(serialized, f, indent=2)
+    tmp.replace(results_file)
+
+
+# Candidate deduplication — merges profiles that share the same email address
 
 def _merge_candidate_profiles(profile_a: dict, profile_b: dict) -> dict:
-    """Merge two profiles for the same person, keeping the most detailed value for each field."""
+    """Merge two candidate profiles — keeps longest name/contact, unions skills, takes max exp."""
     merged = {}
-
-    # Name: pick the longer (more complete) variant
     name_a = (profile_a.get("name") or "").strip()
     name_b = (profile_b.get("name") or "").strip()
     merged["name"] = name_a if len(name_a) >= len(name_b) else name_b
 
-    # Email / phone: prefer non-empty, then longer
     for key in ("email", "phone"):
         val_a = (profile_a.get(key) or "").strip()
         val_b = (profile_b.get(key) or "").strip()
         merged[key] = val_a if len(val_a) >= len(val_b) else val_b
 
-    # Skills: union
-    skills_a = set(profile_a.get("skills") or [])
-    skills_b = set(profile_b.get("skills") or [])
-    merged["skills"] = sorted(skills_a | skills_b)
-
-    # Experience: take the maximum
+    merged["skills"] = sorted(
+        set(profile_a.get("skills") or []) | set(profile_b.get("skills") or [])
+    )
     merged["experience_years"] = max(
         profile_a.get("experience_years", 0.0),
         profile_b.get("experience_years", 0.0),
     )
 
-    # Education: union of unique entries
-    edu_a = profile_a.get("education") or []
-    edu_b = profile_b.get("education") or []
-    seen = set()
-    merged_edu = []
-    for entry in edu_a + edu_b:
-        key = entry.strip().lower()
-        if key not in seen:
-            seen.add(key)
-            merged_edu.append(entry)
-    merged["education"] = merged_edu
-
+    seen, edu = set(), []
+    for entry in (profile_a.get("education") or []) + (profile_b.get("education") or []):
+        k = entry.strip().lower()
+        if k not in seen:
+            seen.add(k)
+            edu.append(entry)
+    merged["education"] = edu
     return merged
 
 
 def merge_duplicate_candidates(extracted: dict) -> dict:
-    """Truth Engine: merge multiple PDFs for the same person (matched by email or phone)."""
-    groups = []
-    assigned = set()
-
+    """Group extracted profiles by shared email and merge each group into one."""
+    groups, assigned = [], set()
     items = list(extracted.items())
 
-    # Build groups by matching email or phone
     for i, (fname_a, info_a) in enumerate(items):
         if fname_a in assigned:
             continue
-        group = [(fname_a, info_a)]
+        group   = [(fname_a, info_a)]
         assigned.add(fname_a)
         email_a = (info_a.get("email") or "").strip().lower()
 
@@ -247,165 +542,381 @@ def merge_duplicate_candidates(extracted: dict) -> dict:
             if fname_b in assigned:
                 continue
             email_b = (info_b.get("email") or "").strip().lower()
-
-            match = False
-            # Only merge on email — email is a reliable unique identifier.
-            # Phone numbers can be shared (family), misread, or partially matched.
             if email_a and email_b and email_a == email_b:
-                match = True
-
-            if match:
                 group.append((fname_b, info_b))
                 assigned.add(fname_b)
-
         groups.append(group)
 
-    # Merge each group
     merged = {}
     for group in groups:
         if len(group) == 1:
             merged[group[0][0]] = group[0][1]
         else:
-            # Progressive merge: fold each profile into the accumulator
-            acc = group[0][1]
-            filenames = [group[0][0]]
+            acc, filenames = group[0][1], [group[0][0]]
             for fname, info in group[1:]:
                 acc = _merge_candidate_profiles(acc, info)
                 filenames.append(fname)
-            primary_key = filenames[0]
             acc["_merged_from"] = filenames
-            merged[primary_key] = acc
-            logger.info(
-                "[TruthEngine] Merged %d profiles → %s (files: %s)",
-                len(filenames), acc.get("name", "?"), filenames,
-            )
+            merged[filenames[0]] = acc
+            logger.info("[TruthEngine] Merged %d profiles → %s", len(filenames), acc.get("name", "?"))
 
     return merged
 
 
-def compare_candidates(profile_a: dict, profile_b: dict) -> dict:
-    """Compute the delta (differences) between two candidate profiles."""
-    delta = {}
-
-    # Name
-    name_a = (profile_a.get("name") or "").strip()
-    name_b = (profile_b.get("name") or "").strip()
-    if name_a != name_b:
-        delta["name"] = {"before": name_a, "after": name_b}
-
-    # Email
-    email_a = (profile_a.get("email") or "").strip()
-    email_b = (profile_b.get("email") or "").strip()
-    if email_a != email_b:
-        delta["email"] = {"before": email_a, "after": email_b}
-
-    # Phone
-    phone_a = (profile_a.get("phone") or "").strip()
-    phone_b = (profile_b.get("phone") or "").strip()
-    if phone_a != phone_b:
-        delta["phone"] = {"before": phone_a, "after": phone_b}
-
-    # Experience
-    exp_a = profile_a.get("experience_years", 0.0)
-    exp_b = profile_b.get("experience_years", 0.0)
-    if exp_a != exp_b:
-        delta["experience_years"] = {"before": exp_a, "after": exp_b}
-
-    # Skills
-    skills_a = set(profile_a.get("skills") or [])
-    skills_b = set(profile_b.get("skills") or [])
-    added   = sorted(skills_b - skills_a)
-    removed = sorted(skills_a - skills_b)
-    if added or removed:
-        delta["skills"] = {"added": added, "removed": removed}
-
-    # Education
-    edu_a = set(e.strip().lower() for e in (profile_a.get("education") or []))
-    edu_b = set(e.strip().lower() for e in (profile_b.get("education") or []))
-    edu_added   = sorted(edu_b - edu_a)
-    edu_removed = sorted(edu_a - edu_b)
-    if edu_added or edu_removed:
-        delta["education"] = {"added": edu_added, "removed": edu_removed}
-
-    return delta
+def _compute_similarities(model_key: str, resume_texts: dict, job_description: str) -> tuple[list, dict]:
+    model_name = VALID_MODELS[model_key]
+    logger.info("[Pipeline] Step 3 — Computing semantic similarity (%s)...", model_name)
+    return rank_resumes_by_similarity(resume_texts, job_description, model_name=model_name), {}
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# Core ML pipeline — submitted to ThreadPoolExecutor by POST /api/screen
+
+def _run_screening_pipeline(
+    req_id: str,
+    session_id: str,
+    session_folder: Path,
+    pdf_files: list,
+    job_description: str,
+    required_skills: list,
+    model_key: str,
+    model_name: str,
+    scoring_cfg: ScoringConfig,
+    started_at: datetime,
+) -> dict:
+    t_step = time.time()
+    parse_failures: list[str] = []
+
+    try:
+        # Step 1: Parse PDFs
+        logger.info("[%s] Step 1 — Parsing %d PDF(s)...", req_id, len(pdf_files))
+        try:
+            resume_texts, parse_failures = load_resumes_from_folder(str(session_folder))
+        except Exception as parse_exc:
+            logger.error("[%s] Parsing stage failed: %s", req_id, parse_exc)
+            _inc("total_parse_failures", len(pdf_files))
+            return {"error": f"PDF parsing failed: {parse_exc}", "candidates": []}
+
+        logger.info("[%s] Step 1 done — %.2fs", req_id, time.time() - t_step)
+        t_step = time.time()
+
+        if parse_failures:
+            logger.warning("[%s] %d PDF(s) unparseable: %s", req_id, len(parse_failures), parse_failures)
+            _inc("total_parse_failures", len(parse_failures))
+
+        if not resume_texts:
+            _inc("total_parse_failures", len(pdf_files))
+            return {
+                "error": "No text could be extracted. Check files are not scanned images or password-protected.",
+                "candidates": [],
+            }
+
+        # Step 2: Extract candidate info
+        logger.info("[%s] Step 2 — Extracting candidate information...", req_id)
+        extracted: dict = {}
+        for filename, text in resume_texts.items():
+            try:
+                extracted[filename] = extract_all(text, filename)
+            except Exception as ex:
+                logger.warning("[%s] extract_all failed for %s: %s", req_id, filename, ex)
+                parse_failures.append(filename)
+                _inc("total_parse_failures")
+
+        logger.info("[%s] Step 2 done — %.2fs", req_id, time.time() - t_step)
+        t_step = time.time()
+
+        # Step 2b: Deduplicate by shared email
+        count_before = len(extracted)
+        extracted    = merge_duplicate_candidates(extracted)
+        merged_count = count_before - len(extracted)
+
+        # Step 3: Semantic similarity
+        try:
+            similarity_results, per_model_similarities = _compute_similarities(
+                model_key, resume_texts, job_description
+            )
+            semantic_ok = True
+        except Exception as sem_exc:
+            # Fall back to skill-only scoring if the semantic model fails
+            logger.error("[%s] Semantic similarity failed: %s — skill-only fallback", req_id, sem_exc)
+            similarity_results     = [{"filename": f, "similarity_score": 0.0} for f in resume_texts]
+            per_model_similarities = {}
+            semantic_ok            = False
+
+        similarity_map = {r["filename"]: r["similarity_score"] for r in similarity_results}
+
+        # Best similarity across merged source files
+        for fname, info in extracted.items():
+            merged_from = info.get("_merged_from", [fname])
+            if len(merged_from) > 1:
+                similarity_map[fname] = max(similarity_map.get(src, 0.0) for src in merged_from)
+
+        logger.info("[%s] Step 3 done — %.2fs", req_id, time.time() - t_step)
+        t_step = time.time()
+
+        # Step 3b: Semantic skill matching
+        semantic_skill_map: dict = {}
+        if required_skills and semantic_ok:
+            try:
+                _skill_model = _sm_get_model(model_name)
+
+                # Encode required skills once; batch-encode all unique candidate skills
+                req_skill_embs = _skill_model.encode(
+                    required_skills,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                unique_skills = list(dict.fromkeys(
+                    skill
+                    for info in extracted.values()
+                    for skill in info.get("skills", [])
+                ))
+                skill_to_idx = {s: i for i, s in enumerate(unique_skills)}
+                cand_indices = [
+                    (fname, [skill_to_idx[s] for s in info.get("skills", []) if s in skill_to_idx])
+                    for fname, info in extracted.items()
+                ]
+
+                if unique_skills:
+                    all_cand_embs  = _skill_model.encode(
+                        unique_skills,
+                        convert_to_numpy=True,
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    )
+                    skill_threshold = SKILL_THRESHOLD_BY_MODEL.get(model_name, SKILL_SEMANTIC_THRESHOLD)
+                    for fname, idxs in cand_indices:
+                        if not idxs:
+                            semantic_skill_map[fname] = set()
+                            continue
+                        cand_embs  = all_cand_embs[idxs]
+                        sim_matrix = np.dot(req_skill_embs, cand_embs.T)
+                        matched    = {
+                            req_skill
+                            for i, req_skill in enumerate(required_skills)
+                            if float(np.max(sim_matrix[i])) >= skill_threshold
+                        }
+                        semantic_skill_map[fname] = matched
+                else:
+                    for fname in extracted:
+                        semantic_skill_map[fname] = set()
+
+            except Exception as skil_exc:
+                # Fall back to empty semantic skill matches; exact-match scoring still runs
+                logger.warning("[%s] Semantic skill matching failed: %s — using exact-only", req_id, skil_exc)
+                for fname in extracted:
+                    semantic_skill_map[fname] = set()
+        else:
+            for fname in extracted:
+                semantic_skill_map[fname] = set()
+
+        logger.info("[%s] Step 3b done — %.2fs", req_id, time.time() - t_step)
+        t_step = time.time()
+
+        # Step 4: Score and rank
+        logger.info("[%s] Step 4 — Scoring and ranking...", req_id)
+        candidates = [
+            {
+                "filename":               fname,
+                "info":                   info,
+                "semantic_score":         similarity_map.get(fname, 0.0),
+                "semantic_skill_matches": semantic_skill_map.get(fname, set()),
+                "resume_text":            resume_texts.get(fname, ""),
+            }
+            for fname, info in extracted.items()
+        ]
+        results    = score_candidates(candidates, required_skills, scoring_cfg, model_key=model_key)
+        serialized = serialize_results(results, skills_configured=bool(required_skills))
+
+        _write_results(_session_results_file(session_id), serialized)
+
+        shortlisted = sum(1 for r in serialized if r["eligible"])
+        elapsed_s   = (datetime.now(timezone.utc) - started_at).total_seconds()
+        _inc("total_resumes_processed", len(serialized))
+
+        logger.info(
+            "[%s] Done — %d ranked | %d shortlisted | model: %s | %.1fs",
+            req_id, len(serialized), shortlisted, model_key, elapsed_s,
+        )
+
+        # Record metrics (non-blocking, swallows errors)
+        try:
+            record_run = getattr(metrics_store, "record_run", None)
+            if callable(record_run):
+                record_run(
+                    run_id=started_at.isoformat(),
+                    model_key=model_key,
+                    job_description=job_description or "",
+                    similarity_results=similarity_results,
+                    per_model_similarities=per_model_similarities or None,
+                    final_scores=serialized,
+                )
+        except Exception as exc:
+            logger.warning("[MetricsStore] Could not record run metrics: %s", exc)
+
+        _write_audit({
+            "timestamp":             started_at.isoformat(),
+            "model":                 model_key,
+            "total_resumes":         len(serialized),
+            "shortlisted":           shortlisted,
+            "rejected":              len(serialized) - shortlisted,
+            "parse_failures":        len(parse_failures),
+            "merged_count":          merged_count,
+            "elapsed_seconds":       round(elapsed_s, 2),
+            "job_description":       (job_description or "")[:MAX_AUDIT_JD_CHARS],
+            "job_description_hash":  hashlib.md5((job_description or "").encode()).hexdigest()[:12],
+            "required_skills":       required_skills,
+            "skill_weight":          round(scoring_cfg.skill_weight, 2),
+            "semantic_weight":       round(scoring_cfg.semantic_weight, 2),
+            "semantic_fallback":     not semantic_ok,
+        })
+
+        return {
+            "message":        "Screening complete.",
+            "model_used":     model_key,
+            "total":          len(serialized),
+            "shortlisted":    shortlisted,
+            "parse_failures": parse_failures,
+            "merged_count":   merged_count,
+            "results":        serialized,
+        }
+
+    except Exception as e:
+        # Catch-all: pipeline never propagates; always returns a structured error dict
+        _inc("total_screen_errors")
+        _log_failure({
+            "request_id": req_id,
+            "session_id": session_id,
+            "model":      model_key,
+            "num_files":  len(pdf_files),
+        }, e)
+        logger.error("[%s] Pipeline failed: %s", req_id, e, exc_info=True)
+        return {"error": str(e), "candidates": []}
+
+
+# Routes
+
+# Allowed IPs for /api/health — empty means allow all (default for local dev)
+_HEALTH_ALLOWED_IPS: set = {
+    ip.strip()
+    for ip in os.environ.get("HEALTH_ALLOWED_IPS", "").split(",")
+    if ip.strip()
+}
+
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    """Lightweight health-check endpoint returning server status and pipeline readiness."""
-    pdf_count = len(list(UPLOAD_FOLDER.glob("*.pdf")))
+    """Health check + live metrics. Not rate-limited — monitoring must always reach this."""
+    if _HEALTH_ALLOWED_IPS:
+        client_ip = request.remote_addr or ""
+        if client_ip not in _HEALTH_ALLOWED_IPS:
+            return jsonify({"status": "ok"}), 200  # minimal response for untrusted callers
+
+    with _active_screenings_lock:
+        active = _active_screenings
+    with _pdf_count_lock:
+        pdfs = _pdf_count
+
     return jsonify({
-        "status":          "ok",
-        "timestamp":       datetime.now(timezone.utc).isoformat(),
-        "active_model":    _active_model_key,
-        "pdfs_uploaded":   pdf_count,
-        "results_ready":   RESULTS_FILE.exists(),
+        "status":            "ok",
+        "timestamp":         datetime.now(timezone.utc).isoformat(),
+        "available_models":  list(VALID_MODELS.keys()),
+        "pdfs_uploaded":     pdfs,
+        "active_sessions":   sum(1 for d in _safe_iterdir(UPLOAD_BASE) if d.is_dir()),
+        "active_screenings": active,
+        "pending_tasks":     sum(1 for t in _task_store.values() if t.get("status") == "pending"),
+        "metrics":           _get_metrics(),
     }), 200
 
 
 @app.route("/api/upload-resumes", methods=["POST"])
 def upload_resumes():
-    """Accept PDF files via multipart form-data, deduplicate by content hash, save to uploads/."""
+    """Accept PDF uploads for a new session. Returns session_id used by /api/screen."""
+    ip = _get_client_ip()
+    if _is_rate_limited(ip):
+        _inc("total_rate_limited")
+        logger.warning("[RateLimit] Upload blocked for %s", ip)
+        return jsonify({"error": "Too many requests. Please wait a minute."}), 429
+
+    if not _disk_space_ok():
+        logger.error("[Overload] Upload rejected — insufficient disk space.")
+        return jsonify({"error": "Server storage is temporarily full. Try again later."}), 503
+
+    _inc("total_upload_requests")
+
     if "files" not in request.files:
         return jsonify({"error": "No files provided"}), 400
 
-    files     = request.files.getlist("files")
-    saved     = []
-    rejected  = []
-    duplicates = []
+    session_id     = uuid.uuid4().hex
+    session_folder = UPLOAD_BASE / session_id
+    session_folder.mkdir(parents=True, exist_ok=True)
 
-    existing_hashes = _existing_hashes()
+    files = request.files.getlist("files")
+    if len(files) > MAX_FILES_PER_SESSION:
+        shutil.rmtree(session_folder, ignore_errors=True)
+        return jsonify({"error": f"Too many files. Maximum {MAX_FILES_PER_SESSION} per session."}), 400
+
+    saved, rejected, duplicates = [], [], []
+    existing_hashes_map = _existing_hashes(session_folder)
 
     for file in files:
         if not file.filename:
             continue
 
-        # ── Type check ───────────────────────────────────────────────────────
         if not allowed_file(file.filename):
             rejected.append({"filename": file.filename, "reason": "Not a PDF file"})
+            _inc("total_files_rejected")
             continue
 
-        # ── Size check (read up to MAX+1 bytes to detect oversized files) ────
-        file.stream.seek(0, 2)          # seek to end
+        # Size check
+        file.stream.seek(0, 2)
         size = file.stream.tell()
         file.stream.seek(0)
         if size > MAX_FILE_BYTES:
             mb = size / (1024 * 1024)
-            rejected.append({
-                "filename": file.filename,
-                "reason": f"File too large ({mb:.1f} MB > 10 MB limit)",
-            })
+            rejected.append({"filename": file.filename, "reason": f"File too large ({mb:.1f} MB > 10 MB limit)"})
+            _inc("total_files_rejected")
             logger.warning("[Upload] Rejected oversized file: %s (%.1f MB)", file.filename, mb)
             continue
 
-        # ── Deduplication check ──────────────────────────────────────────────
-        digest = _file_sha256(file)
-        if digest in existing_hashes:
-            duplicates.append({
-                "filename":   file.filename,
-                "matches":    existing_hashes[digest],
-            })
-            logger.info("[Upload] Duplicate skipped: %s (matches %s)", file.filename, existing_hashes[digest])
+        # Magic bytes check — confirms the file is actually a PDF
+        file.stream.seek(0)
+        header = file.stream.read(5)
+        file.stream.seek(0)
+        if header[:4] != b"%PDF":
+            rejected.append({"filename": file.filename, "reason": "File is not a valid PDF"})
+            _inc("total_files_rejected")
             continue
 
-        # ── Save ─────────────────────────────────────────────────────────────
+        # Deduplication by SHA-256
+        digest = _file_sha256(file)
+        if digest in existing_hashes_map:
+            duplicates.append({"filename": file.filename, "matches": existing_hashes_map[digest]})
+            logger.info("[Upload] Duplicate skipped: %s", file.filename)
+            continue
+
         filename = secure_filename(file.filename)
-        dest = UPLOAD_FOLDER / filename
+        if not filename:
+            rejected.append({"filename": file.filename, "reason": "Invalid filename after sanitization"})
+            _inc("total_files_rejected")
+            continue
+
+        dest = session_folder / filename
         file.save(str(dest))
-        existing_hashes[digest] = filename   # update local cache for this batch
+        existing_hashes_map[digest] = filename
         saved.append(filename)
-        logger.info("[Upload] Saved: %s", filename)
+        _pdf_count_add()
+        _inc("total_files_saved")
+        logger.info("[Upload] Saved to session %s: %s", session_id, filename)
 
     if not saved and not duplicates:
-        return jsonify({
-            "error":    "No valid PDF files uploaded",
-            "rejected": rejected,
-        }), 400
+        shutil.rmtree(session_folder, ignore_errors=True)
+        return jsonify({"error": "No valid PDF files uploaded", "rejected": rejected}), 400
 
+    logger.info("[Upload] Session %s created with %d file(s).", session_id, len(saved))
     return jsonify({
         "message":    f"{len(saved)} resume(s) uploaded.",
+        "session_id": session_id,
         "saved":      saved,
         "duplicates": duplicates,
         "rejected":   rejected,
@@ -414,447 +925,248 @@ def upload_resumes():
 
 @app.route("/api/screen", methods=["POST"])
 def screen():
-    """Run the full 4-step ML pipeline on all uploaded PDFs and return ranked results."""
-    global _active_model_key
+    """
+    Async screening — returns task_id immediately (HTTP 202).
+    Poll GET /api/result/<task_id> until status is 'done' or 'error'.
+    Pass {"sync": true} in the body for synchronous mode (CLI/test use only).
+    """
+    global _active_screenings
+
+    ip = _get_client_ip()
+    if _is_rate_limited(ip):
+        _inc("total_rate_limited")
+        logger.warning("[RateLimit] Screen blocked for %s", ip)
+        return jsonify({"error": "Too many requests. Please wait a minute."}), 429
+
+    _inc("total_screen_requests")
 
     body = request.get_json(silent=True) or {}
     cfg  = load_config()
 
-    job_description = body.get("job_description") or cfg.get("job_description", "")
+    session_id = body.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "Missing session_id. Upload resumes first."}), 400
+    if not _validate_session_id(session_id):
+        return jsonify({"error": "Invalid session_id format."}), 400
+
+    session_folder = UPLOAD_BASE / session_id
+    if not session_folder.is_dir():
+        return jsonify({"error": f"Session '{session_id}' not found. Upload resumes first."}), 404
+
+    job_description = (body.get("job_description") or cfg.get("job_description", ""))[:MAX_JD_CHARS]
+    if not job_description or len(job_description.strip()) < 20:
+        return jsonify({"error": "Job description is required (minimum 20 characters)."}), 400
+
     required_skills = body.get("required_skills") or cfg.get("required_skills", [])
-    cfg_override    = body.get("config", {})
+    if isinstance(required_skills, str):
+        required_skills = [s.strip() for s in required_skills.split(",") if s.strip()]
+    elif not isinstance(required_skills, list):
+        return jsonify({"error": "required_skills must be a list of strings."}), 400
 
-    # Model: prefer request body, then session default
-    model_key = body.get("model", _active_model_key)
+    # Normalize, deduplicate, and cap the skills list
+    required_skills = list(dict.fromkeys(
+        normalize_skill(s)[:100]
+        for s in required_skills
+        if isinstance(s, str) and s.strip()
+    ))[:MAX_REQUIRED_SKILLS]
+
+    model_key = body.get("model") or cfg.get("model", "mpnet")
     if model_key not in VALID_MODELS:
-        return jsonify({
-            "error": f"Unknown model '{model_key}'. Valid options: {list(VALID_MODELS)}"
-        }), 400
+        return jsonify({"error": f"Unknown model '{model_key}'. Valid options: {list(VALID_MODELS)}"}), 400
+    model_name = VALID_MODELS[model_key]
 
-    model_name        = VALID_MODELS[model_key]
-    _active_model_key = model_key
-
-    # Build scoring config
+    cfg_override   = body.get("config", {})
     base_scoring   = cfg.get("scoring", DEFAULT_CONFIG["scoring"])
-    scoring_params = {**base_scoring, **cfg_override}
+    scoring_params = {k: v for k, v in {**base_scoring, **cfg_override}.items() if k in _SCORING_FIELDS}
     try:
         scoring_cfg = ScoringConfig(**scoring_params)
     except Exception as e:
         return jsonify({"error": f"Invalid scoring config: {e}"}), 400
 
-    # Check for uploaded PDFs
-    pdf_files = list(UPLOAD_FOLDER.glob("*.pdf"))
+    pdf_files = list(session_folder.glob("*.pdf"))
     if not pdf_files:
-        return jsonify({"error": "No resumes found. Upload PDFs first."}), 400
+        return jsonify({"error": "No resumes found in session. Upload PDFs first."}), 400
+
+    # Concurrency guard — increment before submitting to prevent burst overload
+    with _active_screenings_lock:
+        if _active_screenings >= MAX_CONCURRENT_SCREENINGS:
+            _inc("total_overload_rejected")
+            logger.warning(
+                "[Overload] Screen rejected — %d/%d slots in use.",
+                _active_screenings, MAX_CONCURRENT_SCREENINGS,
+            )
+            return jsonify({"error": "Server is busy. Please try again shortly."}), 503
+        _active_screenings += 1
 
     started_at = datetime.now(timezone.utc)
+    req_id     = uuid.uuid4().hex[:8]
+    task_id    = uuid.uuid4().hex
 
-    try:
-        # Step 1 — Parse PDFs
-        logger.info("[Pipeline] Step 1 — Parsing %d PDF(s)...", len(pdf_files))
-        resume_texts, parse_failures = load_resumes_from_folder(str(UPLOAD_FOLDER))
-        if parse_failures:
-            logger.warning("[Pipeline] %d PDF(s) unparseable: %s", len(parse_failures), parse_failures)
-        if not resume_texts:
-            return jsonify({"error": "No text could be extracted. Check files are not scanned images or password-protected."}), 422
+    # Register task before submitting — prevents polling races before the worker sets "running"
+    _task_set(task_id, {
+        "status":     "pending",
+        "session_id": session_id,
+        "created_at": time.time(),
+        "req_id":     req_id,
+    })
 
-        # Step 2 — Extract candidate information
-        logger.info("[Pipeline] Step 2 — Extracting candidate information...")
-        extracted = {}
-        for filename, text in resume_texts.items():
-            try:
-                extracted[filename] = extract_all(text, filename)
-            except Exception as ex:
-                logger.warning("[Pipeline] extract_all failed for %s: %s", filename, ex)
-                parse_failures.append(filename)
-
-        # Step 2b — Truth Engine: merge duplicate candidates (same email/phone)
-        logger.info("[Pipeline] Step 2b — Running Truth Engine (duplicate merge)...")
-        count_before_merge = len(extracted)
-        extracted = merge_duplicate_candidates(extracted)
-        merged_count = count_before_merge - len(extracted)
-
-        # Step 3 — Compute document-level semantic similarity
-        # Use ensemble (all 3 models) when model_key == "ensemble", otherwise
-        # fall back to the single selected model.
-        # We run each model individually (instead of rank_resumes_ensemble) so
-        # that we can capture per_model_similarities for metrics recording and
-        # Spearman rank-correlation analysis.
-        per_model_similarities: dict = {}
-        if model_key == "ensemble":
-            logger.info("[Pipeline] Step 3 — Ensemble semantic similarity (all 3 models)...")
-            for _m in ENSEMBLE_WEIGHTS:
-                per_model_similarities[_m] = semantic_matcher.rank_resumes_by_similarity(
-                    resume_texts, job_description, model_name=_m
-                )
-            # Weighted average (mirrors rank_resumes_ensemble logic)
-            total_weight = sum(ENSEMBLE_WEIGHTS.values())
-            accumulated: dict = {fname: 0.0 for fname in resume_texts}
-            for _m, _w in ENSEMBLE_WEIGHTS.items():
-                for r in per_model_similarities[_m]:
-                    accumulated[r["filename"]] += _w * r["similarity_score"]
-            similarity_results = [
-                {"filename": f, "similarity_score": round(float(np.clip(s / total_weight, 0.0, 1.0)), 4)}
-                for f, s in accumulated.items()
-            ]
-            similarity_results.sort(key=lambda x: x["similarity_score"], reverse=True)
-        else:
-            logger.info("[Pipeline] Step 3 — Computing semantic similarity (%s)...", model_name)
-            similarity_results = semantic_matcher.rank_resumes_by_similarity(
-                resume_texts, job_description, model_name=model_name
-            )
-        similarity_map = {r["filename"]: r["similarity_score"] for r in similarity_results}
-
-        # Step 3b — Skill-level semantic matching
-        # Use embeddings to find required skills that semantically match
-        # each candidate's extracted skills (catches near-synonyms not in the
-        # static alias table, e.g. "collaboration" → "adaptability").
-        skill_model = semantic_matcher.MPNET_MODEL if model_key == "ensemble" else model_name
-        logger.info("[Pipeline] Step 3b — Semantic skill matching (%s)...", skill_model)
-        semantic_skill_map: dict = {}
-        for fname, info in extracted.items():
-            semantic_skill_map[fname] = semantic_matcher.compute_skill_semantic_matches(
-                info.get("skills", []),
-                required_skills,
-                model_name=skill_model,
-            )
-
-        # Step 4 — Score and rank
-        logger.info("[Pipeline] Step 4 — Scoring and ranking...")
-        candidates = [
-            {
-                "filename":              fname,
-                "info":                  info,
-                "semantic_score":        similarity_map.get(fname, 0.0),
-                "semantic_skill_matches": semantic_skill_map.get(fname, set()),
-            }
-            for fname, info in extracted.items()
-        ]
-        results    = score_candidates(candidates, required_skills, scoring_cfg)
-        serialized = serialize_results(results)
-
-        # Cache to disk
-        with open(RESULTS_FILE, "w") as f:
-            json.dump(serialized, f, indent=2)
-
-        shortlisted = sum(1 for r in serialized if r["eligible"])
-        elapsed_s   = (datetime.now(timezone.utc) - started_at).total_seconds()
-
-        logger.info(
-            "[Pipeline] Done — %d ranked | %d shortlisted | model: %s | %.1fs",
-            len(serialized), shortlisted, model_key, elapsed_s,
-        )
-
-        # ── Metrics store — record cosine similarities, stats, and accuracy ──
+    def _worker():
         try:
-            record_run(
-                run_id=started_at.isoformat(),
+            _task_update(task_id, {"status": "running"})
+            result = _run_screening_pipeline(
+                req_id=req_id,
+                session_id=session_id,
+                session_folder=session_folder,
+                pdf_files=pdf_files,
+                job_description=job_description,
+                required_skills=required_skills,
                 model_key=model_key,
-                job_description=job_description or "",
-                similarity_results=similarity_results,
-                per_model_similarities=per_model_similarities or None,
-                final_scores=serialized,
+                model_name=model_name,
+                scoring_cfg=scoring_cfg,
+                started_at=started_at,
             )
-        except Exception as _me:
-            logger.warning("[MetricsStore] Could not record run metrics: %s", _me)
+            _task_update(task_id, {
+                "status":      "error" if "error" in result else "done",
+                "result":      result,
+                "finished_at": time.time(),
+            })
+        finally:
+            # Always decrement, even on unexpected exception
+            with _active_screenings_lock:
+                global _active_screenings
+                _active_screenings = max(0, _active_screenings - 1)
 
-        # ── Audit log ────────────────────────────────────────────────────────
-        _write_audit({
-            "timestamp":        started_at.isoformat(),
-            "model":            model_key,
-            "total_resumes":    len(serialized),
-            "shortlisted":      shortlisted,
-            "rejected":         len(serialized) - shortlisted,
-            "parse_failures":   len(parse_failures),
-            "merged_count":     merged_count,
-            "elapsed_seconds":  round(elapsed_s, 2),
-            "job_description":  (job_description or "")[:MAX_AUDIT_JD_CHARS],
-            "required_skills":  required_skills,
-            "skill_weight":     round(scoring_cfg.skill_weight, 2),
-            "semantic_weight":  round(scoring_cfg.semantic_weight, 2),
-        })
+    # Synchronous mode ({"sync": true}) — blocks the request thread; useful for CLI/tests
+    if body.get("sync", False):
+        _worker()
+        task = _task_get(task_id)
+        if task is None:
+            logger.error("[%s] Task %s missing after synchronous execution.", req_id, task_id)
+            return jsonify({"error": "Task result unavailable."}), 500
+        result = task.get("result", {})
+        if "error" in result:
+            return jsonify(result), 500
+        return jsonify(result), 200
 
+    _screening_executor.submit(_worker)
+    logger.info("[%s] Task %s submitted (session %s, model %s)", req_id, task_id, session_id, model_key)
+
+    return jsonify({
+        "task_id":  task_id,
+        "status":   "pending",
+        "poll_url": f"/api/result/{task_id}",
+        "message":  f"Screening started. Poll {task_id} for results.",
+    }), 202
+
+
+@app.route("/api/result/<task_id>", methods=["GET"])
+def get_result(task_id: str):
+    """Poll endpoint for async screening results. Returns 202 while pending/running, 200 when done."""
+    if not re.fullmatch(r"[a-f0-9]{32}", task_id):
+        return jsonify({"error": "Invalid task_id format."}), 400
+
+    task = _task_get(task_id)
+    if task is None:
+        return jsonify({"error": "Task not found. It may have expired (TTL 1hr)."}), 404
+
+    status = task.get("status", "unknown")
+    if status in ("pending", "running"):
+        return jsonify({"status": status, "task_id": task_id}), 202
+
+    result = task.get("result", {})
+    if status == "error" or ("error" in result and not result.get("results")):
         return jsonify({
-            "message":       "Screening complete.",
-            "model_used":    model_key,
-            "total":         len(serialized),
-            "shortlisted":   shortlisted,
-            "parse_failures": parse_failures,
-            "merged_count":  merged_count,
-            "results":       serialized,
-        }), 200
+            "status":     "error",
+            "error":      result.get("error", "Unknown error"),
+            "candidates": [],
+        }), 500
 
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/results", methods=["GET"])
-def get_results():
-    """Return the most recent screening results from disk."""
-    if not RESULTS_FILE.exists():
-        return jsonify({"error": "No results yet. Run /api/screen first."}), 404
-    try:
-        with open(RESULTS_FILE) as f:
-            results = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        return jsonify({"error": f"Could not read results: {e}"}), 500
-    return jsonify({"results": results, "total": len(results)}), 200
-
-
-@app.route("/api/candidate/<int:candidate_id>", methods=["GET"])
-def get_candidate(candidate_id: int):
-    """Return full detail for a single candidate by their ID."""
-    if not RESULTS_FILE.exists():
-        return jsonify({"error": "No results found."}), 404
-    with open(RESULTS_FILE) as f:
-        results = json.load(f)
-    match = next((r for r in results if r["id"] == candidate_id), None)
-    if not match:
-        return jsonify({"error": f"Candidate {candidate_id} not found."}), 404
-    return jsonify(match), 200
+    return jsonify({"status": "done", "task_id": task_id, **result}), 200
 
 
 @app.route("/api/config", methods=["GET"])
 def get_config():
-    """Return the current job configuration."""
     return jsonify(load_config()), 200
 
 
 @app.route("/api/config", methods=["POST"])
 def post_config():
-    """Save job config from the frontend Job Config panel."""
+    """Validate and persist config updates. Only ALLOWED_CONFIG_KEYS are accepted."""
     body = request.get_json(silent=True)
     if not body:
         return jsonify({"error": "No JSON body provided"}), 400
-    save_config(body)
-    logger.info("[Config] config.json updated.")
+    if len(json.dumps(body)) > MAX_CONFIG_BYTES:
+        return jsonify({"error": "Config payload too large."}), 413
+
+    sanitized = {k: v for k, v in body.items() if k in ALLOWED_CONFIG_KEYS}
+    if not sanitized:
+        return jsonify({"error": "No valid config keys provided."}), 400
+
+    if "job_description" in sanitized and not isinstance(sanitized["job_description"], str):
+        return jsonify({"error": "job_description must be a string."}), 400
+
+    if "required_skills" in sanitized:
+        if not isinstance(sanitized["required_skills"], list):
+            return jsonify({"error": "required_skills must be a list."}), 400
+        sanitized["required_skills"] = [
+            normalize_skill(s)[:100]
+            for s in sanitized["required_skills"]
+            if isinstance(s, str) and s.strip()
+        ]
+
+    existing = load_config()
+    existing.update(sanitized)
+    save_config(existing)
+    logger.info("[Config] config.json updated (keys: %s).", list(sanitized.keys()))
     return jsonify({"message": "config.json saved."}), 200
-
-
-@app.route("/api/model", methods=["GET"])
-def get_model():
-    """Return the currently active embedding model."""
-    return jsonify({
-        "active":    _active_model_key,
-        "full_name": VALID_MODELS[_active_model_key],
-        "available": list(VALID_MODELS.keys()),
-    }), 200
 
 
 @app.route("/api/model", methods=["POST"])
 def set_model():
-    """Switch the active embedding model for this session."""
-    global _active_model_key
+    """Validate and confirm a model selection (does not persist to config)."""
     body      = request.get_json(silent=True) or {}
     model_key = body.get("model", "")
-
     if model_key not in VALID_MODELS:
-        return jsonify({
-            "error": f"Unknown model '{model_key}'. Valid: {list(VALID_MODELS)}"
-        }), 400
-
-    _active_model_key = model_key
-    label = "all models (ensemble)" if model_key == "ensemble" else VALID_MODELS[model_key]
-    logger.info("[Model] Switched to %s", label)
-    return jsonify({
-        "message":   f"Switched to {label}",
-        "active":    model_key,
-        "full_name": VALID_MODELS[model_key],
-    }), 200
+        return jsonify({"error": f"Unknown model '{model_key}'. Valid: {list(VALID_MODELS)}"}), 400
+    label = VALID_MODELS[model_key]
+    logger.info("[Model] Client switched to %s", label)
+    return jsonify({"message": f"Switched to {label}", "active": model_key, "full_name": label}), 200
 
 
 @app.route("/api/clear", methods=["POST"])
 def clear_uploads():
-    """Delete all uploaded PDFs and clear results. Called on 'New Screening'."""
-    for f in UPLOAD_FOLDER.glob("*.pdf"):
-        f.unlink()
-    if RESULTS_FILE.exists():
-        RESULTS_FILE.unlink()
-    logger.info("[Clear] All uploads and results cleared.")
-    return jsonify({"message": "Uploads and results cleared."}), 200
+    """Delete all uploads and results for a given session_id."""
+    body       = request.get_json(silent=True) or {}
+    session_id = body.get("session_id", "")
+
+    if not session_id:
+        return jsonify({"error": "No session_id provided."}), 400
+    if not _validate_session_id(session_id):
+        return jsonify({"error": "Invalid session_id format."}), 400
+
+    session_folder = UPLOAD_BASE / session_id
+    if session_folder.is_dir():
+        pdf_count = sum(1 for _ in session_folder.glob("*.pdf"))
+        shutil.rmtree(session_folder, ignore_errors=True)
+        _pdf_count_sub(pdf_count)
+        logger.info("[Clear] Session uploads cleared: %s", session_id)
+
+    results_file = _session_results_file(session_id)
+    if results_file.exists():
+        results_file.unlink()
+        logger.info("[Clear] Session results cleared: %s", session_id)
+
+    return jsonify({"message": "Session cleared."}), 200
 
 
-@app.route("/api/export", methods=["GET"])
-def export_results():
-    """Download the latest screening results (shortlisted candidates only) as a CSV file."""
-    if not RESULTS_FILE.exists():
-        return jsonify({"error": "No results available. Run screening first."}), 404
+# Entry point — _startup_init() already ran at module level above
 
-    try:
-        with open(RESULTS_FILE) as f:
-            results = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        return jsonify({"error": f"Could not read results: {e}"}), 500
-
-    shortlisted = [r for r in results if r.get("eligible")]
-    if not shortlisted:
-        return jsonify({"error": "No shortlisted candidates to export."}), 404
-
-    output = io.StringIO()
-    fieldnames = ["rank", "name", "email", "phone", "experience", "skill_score_pct",
-                  "semantic_score_pct", "final_score_pct", "matched_skills", "missing_skills", "filename"]
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for r in shortlisted:
-        writer.writerow({
-            "rank":               r.get("rank", ""),
-            "name":               r.get("name", ""),
-            "email":              r.get("email", ""),
-            "phone":              r.get("phone", ""),
-            "experience":         r.get("experience", 0),
-            "skill_score_pct":    f"{r.get('skillScore', 0) * 100:.1f}%",
-            "semantic_score_pct": f"{r.get('semanticScore', 0) * 100:.1f}%",
-            "final_score_pct":    f"{r.get('finalScore', 0) * 100:.1f}%",
-            "matched_skills":     "; ".join(r.get("matched_skills", [])),
-            "missing_skills":     "; ".join(r.get("missing_skills", [])),
-            "filename":           r.get("filename", ""),
-        })
-
-    csv_bytes = output.getvalue().encode("utf-8")
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return Response(
-        csv_bytes,
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=shortlisted_{timestamp}.csv"},
-    )
-
-
-@app.route("/api/audit", methods=["GET"])
-def get_audit():
-    """Return the last N screening audit log entries (default 20, max 100)."""
-    try:
-        limit = min(int(request.args.get("limit", 20)), 100)
-    except (ValueError, TypeError):
-        limit = 20
-
-    if not AUDIT_FILE.exists():
-        return jsonify({"entries": [], "total": 0}), 200
-
-    try:
-        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()
-        entries = []
-        for line in lines:
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-        # Most-recent first
-        entries.reverse()
-        return jsonify({"entries": entries[:limit], "total": len(entries)}), 200
-    except OSError as e:
-        return jsonify({"error": f"Could not read audit log: {e}"}), 500
-
-
-@app.route("/api/compare", methods=["POST"])
-def compare():
-    """Compare two candidates by their IDs and return a detailed delta."""
-    if not RESULTS_FILE.exists():
-        return jsonify({"error": "No results found. Run screening first."}), 404
-
-    body = request.get_json(silent=True) or {}
-    id_a = body.get("id_a")
-    id_b = body.get("id_b")
-    if not id_a or not id_b:
-        return jsonify({"error": "Provide id_a and id_b in the request body."}), 400
-
-    try:
-        with open(RESULTS_FILE) as f:
-            results = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        return jsonify({"error": f"Could not read results: {e}"}), 500
-
-    cand_a = next((r for r in results if r["id"] == id_a), None)
-    cand_b = next((r for r in results if r["id"] == id_b), None)
-    if not cand_a:
-        return jsonify({"error": f"Candidate {id_a} not found."}), 404
-    if not cand_b:
-        return jsonify({"error": f"Candidate {id_b} not found."}), 404
-
-    # Build profile dicts from serialized results
-    profile_a = {
-        "name": cand_a.get("name", ""),
-        "email": cand_a.get("email", ""),
-        "phone": cand_a.get("phone", ""),
-        "skills": cand_a.get("skills", []),
-        "experience_years": cand_a.get("experience", 0.0),
-        "education": cand_a.get("education", []),
-    }
-    profile_b = {
-        "name": cand_b.get("name", ""),
-        "email": cand_b.get("email", ""),
-        "phone": cand_b.get("phone", ""),
-        "skills": cand_b.get("skills", []),
-        "experience_years": cand_b.get("experience", 0.0),
-        "education": cand_b.get("education", []),
-    }
-
-    delta = compare_candidates(profile_a, profile_b)
-
-    # score_delta: positive means candidate A scores higher than candidate B
-    score_delta = {
-        "skillScore":    round(cand_a.get("skillScore", 0) - cand_b.get("skillScore", 0), 4),
-        "semanticScore": round(cand_a.get("semanticScore", 0) - cand_b.get("semanticScore", 0), 4),
-        "finalScore":    round(cand_a.get("finalScore", 0) - cand_b.get("finalScore", 0), 4),
-    }
-
-    return jsonify({
-        "candidate_a": cand_a,
-        "candidate_b": cand_b,
-        "profile_delta": delta,
-        "score_delta": score_delta,
-    }), 200
-
-
-@app.route("/metrics/latest", methods=["GET"])
-def get_metrics_latest():
-    """Return evaluation metrics for the most recent screening run."""
-    run = load_latest_run()
-    if not run:
-        return jsonify({"available": False}), 200
-
-    ev    = run.get("evaluation") or {}
-    stats = run.get("stats")      or {}
-
-    return jsonify({
-        "available":        True,
-        "model":            run.get("model_key"),
-        "candidate_count":  run.get("resume_count"),
-        "threshold":        ev.get("threshold"),
-        "accuracy":         ev.get("accuracy"),
-        "precision":        ev.get("precision"),
-        "recall":           ev.get("recall"),
-        "f1":               ev.get("f1"),
-        "mean_similarity":  stats.get("mean"),
-        "std_similarity":   stats.get("std"),
-        "timestamp":        run.get("timestamp"),
-    }), 200
-
-
-# ── Serve React build (production) ────────────────────────────────────────────
-@app.route("/", defaults={"path": ""})
-@app.route("/<path:path>")
-def serve_react(path):
-    """Serves the built React app in production; in dev, React runs on port 3000."""
-    build_dir = Path("frontend/build")
-    if build_dir.exists():
-        if path and (build_dir / path).exists():
-            return send_from_directory(str(build_dir), path)
-        return send_from_directory(str(build_dir), "index.html")
-    return jsonify({"message": "Flask API running. Start React dev server on port 3000."}), 200
-
-
-# ── Start ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
-
     print("=" * 58)
     print("  ML-Based Resume Screening System — Flask API")
     print(f"  Running on port {port}")
     print(f"  Default model   : {VALID_MODELS['mpnet']}")
     print(f"  Available models: {', '.join(VALID_MODELS)}")
     print("=" * 58)
-
     app.run(host="0.0.0.0", port=port)

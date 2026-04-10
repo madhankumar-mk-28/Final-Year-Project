@@ -373,10 +373,8 @@ def score_candidates(candidates: list, required_skills: list,
             r["band"] = "Not Eligible"
         elif r["final_score"] >= dyn_threshold + 0.10:
             r["band"] = "Strong Fit"
-        elif r["final_score"] >= dyn_threshold - 0.05:
-            r["band"] = "Borderline"
         else:
-            r["band"] = "Weak Fit"
+            r["band"] = "Good Fit"
 
         logger.debug(
             "[scoring_engine] %s | skill=%.2f sem=%.2f exp=%.2f → final=%.2f | thresh=%.2f | %s",
