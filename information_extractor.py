@@ -4,8 +4,14 @@ import logging
 
 logger = logging.getLogger("information_extractor")
 
+# ---------------------------------------------------------------------------
+# Skills database
+# ---------------------------------------------------------------------------
+# Single canonical list of recognised skills.  "c" and "r" (single chars) are
+# intentionally absent — word-boundary regex matches them inside words like
+# "Grade C" or "R&D", which produces false positives.
+
 SKILLS_DB = {
-    # "c" and "r" removed — single-char \b matches produce false positives ("Grade C", "R&D")
     "c programming", "r programming",
     "python", "java", "javascript", "typescript", "c++", "c#",
     "go", "golang", "rust", "kotlin", "swift", "php", "ruby", "scala",
@@ -75,21 +81,67 @@ SKILLS_DB = {
     "adaptability", "creativity", "innovation",
 }
 
-# Pre-compiled at import — replaces 100+ per-resume regex calls with a single pass
-_MULTI_WORD_SKILLS = sorted([s for s in SKILLS_DB if " " in s], key=len, reverse=True)
+# ---------------------------------------------------------------------------
+# Pre-compiled patterns — built once at import, reused on every resume
+# ---------------------------------------------------------------------------
+
+# Multi-word skills sorted longest-first so "machine learning" is matched
+# before "machine" or "learning" individually.
+_MULTI_WORD_SKILLS  = sorted([s for s in SKILLS_DB if " " in s], key=len, reverse=True)
 _SINGLE_WORD_SKILLS = sorted([s for s in SKILLS_DB if " " not in s], key=len, reverse=True)
+
+# One combined regex for all single-word skills — faster than iterating them
 _SINGLE_SKILL_RE = re.compile(
     r"\b(" + "|".join(re.escape(s) for s in _SINGLE_WORD_SKILLS) + r")\b"
 )
+
+# Degree pattern — 80-char cap prevents it from consuming entire paragraphs
 DEGREE_PATTERN = re.compile(
     r"(b\.?sc|b\.?tech|b\.?e\.?|bca|bba|bachelor|m\.?sc|m\.?tech|m\.?e\.?|mca|mba|master|ph\.?d|diploma)"
-    r"[\w\s,.()-]{0,80}",  # Hard cap at 80 chars — prevents consuming entire paragraphs
+    r"[\w\s,.()-]{0,80}",
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Experience extraction constants — at module level so they compile once
+# ---------------------------------------------------------------------------
+
+# Patterns that require the word "experience" — much less likely to fire on
+# educational duration phrases like "4-year B.Tech programme".
+_EXP_WORK_PATTERNS = [
+    r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+of\s+(?:professional\s+|work\s+|industry\s+|total\s+)?experience",
+    r"experience\s*(?:of\s+)?(\d+(?:\.\d+)?)\s*\+?\s*years?",
+    r"(\d+(?:\.\d+)?)\s*\+?\s*yrs?\s+(?:of\s+)?(?:professional\s+|work\s+)?experience",
+    r"worked\s+for\s+(\d+(?:\.\d+)?)\s*\+?\s*years?",
+    r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:professional\s+)?(?:work\s+)?experience",
+]
+
+# Lines containing any of these words are treated as academic context.
+# Year figures on such lines are used only as a last-resort fallback,
+# preventing "4-year B.Tech programme" from being counted as 4 years of work.
+_EXP_ACADEMIC_RE = re.compile(
+    r"\b(degree|b\.?tech|m\.?tech|b\.?e\.?|bca|b\.?sc|m\.?sc|mba|engineering\s+program"
+    r"|college|university|academic|curriculum|course\s*work|semester|fresher|pursuing"
+    r"|programme?|graduation|undergraduate|postgraduate|study|studies|institution)\b",
+    re.IGNORECASE,
+)
+
+# Hard cap: no plausible entry-level or mid-level candidate has more than 15
+# years of experience.  Values above this are clamped, not discarded, so
+# "20 years of experience" still yields 15.0 rather than 0.0.
+_EXP_MAX_YEARS = 15.0
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def extract_all(text: str, filename: str = "") -> dict:
-    """Extract all structured fields from resume text; uses filename for name if provided."""
+    """Extract all structured fields from resume text.
+
+    Uses the filename as the candidate's name when the text itself does not
+    contain a clear name at the top of the document.
+    """
     result = {
         "name":             name_from_filename(filename) if filename else "Unknown",
         "email":            extract_email(text),
@@ -107,7 +159,12 @@ def extract_all(text: str, filename: str = "") -> dict:
 
 
 def name_from_filename(filename: str) -> str:
-    """Derive a clean candidate name from the PDF filename by stripping extensions, noise words, and numbers."""
+    """Derive a human-readable candidate name from the PDF filename.
+
+    Strips file extensions, common noise words (resume, cv, latest, etc.),
+    numbering suffixes, and special characters, then returns a title-cased name.
+    Returns 'Unknown' when the filename itself is a noise word.
+    """
     base = filename
     while True:
         stem, ext = os.path.splitext(base)
@@ -116,19 +173,21 @@ def name_from_filename(filename: str) -> str:
         else:
             break
 
+    # Convert delimiters to spaces FIRST so word-boundary regex \b works
+    # correctly on tokens like "_Resume" (underscore is a word char in regex).
+    base = re.sub(r"[_\-\.]", " ", base)
+
     noise_words = (
         r"\b(resume|cv|curriculum|vitae|new|latest|final|updated|"
         r"deloitte|profile|portfolio|theme|engineeringresumes|rendercv)\b"
     )
     base = re.sub(noise_words, "", base, flags=re.IGNORECASE)
-    base = re.sub(r"\s*[\(\[]\d+[\)\]]", "", base)   # remove trailing (1), [2], etc.
-    base = re.sub(r"\-\d+$", "", base)                # remove trailing dash-number
-    base = re.sub(r"[_\-\.]", " ", base)
+    base = re.sub(r"\s*[\(\[]\d+[\)\]]", "", base)   # strip trailing (1), [2], etc.
+    base = re.sub(r"\-\d+$", "", base)                # strip trailing dash-number suffix
     base = re.sub(r"[^A-Za-z\s]", " ", base)
     base = re.sub(r"\s+", " ", base).strip()
 
     if not base or len(base) < 2:
-        # Raw filename is itself a noise word (e.g. "resume.pdf") — return "Unknown" instead
         fallback = os.path.splitext(filename)[0].replace("_", " ").strip()
         _noise = {"resume", "cv", "final", "new", "latest", "updated", "profile",
                   "curriculum vitae", "final updated resume", "final resume"}
@@ -139,7 +198,7 @@ def name_from_filename(filename: str) -> str:
     words = base.split()
     titled = []
     for w in words:
-        if w.isupper() and len(w) <= 3:  # preserve short all-caps abbreviations (e.g. "ML")
+        if w.isupper() and len(w) <= 3:   # keep short all-caps like "ML" intact
             titled.append(w)
         else:
             titled.append(w.capitalize())
@@ -147,21 +206,21 @@ def name_from_filename(filename: str) -> str:
 
 
 def extract_email(text: str) -> str:
-    """Extract the first valid email address found in the resume text."""
+    """Return the first valid email address found in the resume, or an empty string."""
     m = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
     return m.group(0).lower() if m else ""
 
 
 def _normalize_phone(raw: str) -> str:
-    """Normalise a matched phone string into +CC-XXXXXXXXXX or bare 10-digit format."""
+    """Normalise a matched phone string to +CC-XXXXXXXXXX or a bare 10-digit number."""
     has_plus = raw.startswith("+") or raw.startswith("(+")
-    digits = re.sub(r"[^\d]", "", raw)
+    digits   = re.sub(r"[^\d]", "", raw)
 
-    if digits.startswith("91") and len(digits) == 12:  # Indian with country code
+    if digits.startswith("91") and len(digits) == 12:   # Indian with country code
         return f"+91-{digits[2:]}"
-    if len(digits) == 10 and digits[0] in "6789":       # Bare 10-digit Indian mobile
+    if len(digits) == 10 and digits[0] in "6789":        # bare 10-digit Indian mobile
         return digits
-    if has_plus and len(digits) >= 11:                  # International
+    if has_plus and len(digits) >= 11:                   # international
         if len(digits) <= 13:
             cc_len = len(digits) - 10
             return f"+{digits[:cc_len]}-{digits[cc_len:]}"
@@ -170,14 +229,14 @@ def _normalize_phone(raw: str) -> str:
 
 
 def extract_phone(text: str) -> str:
-    """Extract Indian mobile numbers and international numbers from resume text."""
+    """Return the first Indian mobile or international phone number found, or an empty string."""
     patterns = [
-        r"\+91[\s\-]?[6-9]\d{9}",                                      # +91 Indian
-        r"\+91[\s\-]?\d{3}[\s\-]?\d{3}[\s\-]?\d{4}",                  # +91 with separators
-        r"\b[6-9]\d{4}[\s\-]?\d{5}\b",                                  # 10-digit Indian
-        r"\b[6-9]\d{9}\b",                                               # straight 10-digit
-        r"\(\+91\)[\s]?[6-9]\d{9}",                                     # (+91) format
-        r"\+\d{1,3}[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}",       # international
+        r"\+91[\s\-]?[6-9]\d{9}",
+        r"\+91[\s\-]?\d{3}[\s\-]?\d{3}[\s\-]?\d{4}",
+        r"\b[6-9]\d{4}[\s\-]?\d{5}\b",
+        r"\b[6-9]\d{9}\b",
+        r"\(\+91\)[\s]?[6-9]\d{9}",
+        r"\+\d{1,3}[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}",
     ]
     for pat in patterns:
         m = re.search(pat, text)
@@ -187,37 +246,56 @@ def extract_phone(text: str) -> str:
 
 
 def extract_skills(text: str) -> list:
-    """Match skills from SKILLS_DB against resume text using substring for multi-word and regex for single-word."""
+    """Match skills from SKILLS_DB against resume text.
+
+    Multi-word skills use substring search (longest-first to prevent partial
+    matches).  Single-word skills use a single pre-compiled regex pass.
+    """
     text_lower = text.lower()
     found = set()
 
-    for skill in _MULTI_WORD_SKILLS:   # longest first to prevent partial matches
+    for skill in _MULTI_WORD_SKILLS:
         if skill in text_lower:
             found.add(skill)
 
-    found.update(_SINGLE_SKILL_RE.findall(text_lower))  # single combined regex pass
-
+    found.update(_SINGLE_SKILL_RE.findall(text_lower))
     return sorted(found)
 
 
 def extract_experience_years(text: str) -> float:
-    """Extract the maximum years-of-experience figure mentioned in the resume text."""
-    patterns = [
-        r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?experience",
-        r"experience\s*(?:of\s+)?(\d+(?:\.\d+)?)\s*\+?\s*years?",
-        r"(\d+(?:\.\d+)?)\s*\+?\s*yrs?\s+(?:of\s+)?experience",
-        r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:professional\s+)?(?:work\s+)?experience",
-        r"worked\s+for\s+(\d+(?:\.\d+)?)\s*\+?\s*years?",
-    ]
-    all_matches: set[str] = set()
-    for pat in patterns:
-        all_matches.update(re.findall(pat, text, re.IGNORECASE))  # set deduplicates overlapping pattern matches
+    """Return the candidate's years of professional work experience.
 
-    return max((float(y) for y in all_matches), default=0.0)
+    Processes the resume line-by-line.  Lines containing academic keywords
+    (degree, college, university, etc.) are deprioritised: any year figures on
+    those lines are used only as a last-resort fallback.  This prevents a
+    '4-year B.Tech programme' from being counted as 4 years of work experience.
+
+    Values are clamped to _EXP_MAX_YEARS (15) so that template phrases like
+    '20+ years of industry experience' don't wildly inflate a junior candidate's
+    score.
+    """
+    work_matches:     list[float] = []
+    fallback_matches: list[float] = []
+
+    for line in text.splitlines():
+        is_academic = bool(_EXP_ACADEMIC_RE.search(line))
+        for pat in _EXP_WORK_PATTERNS:
+            for m in re.finditer(pat, line, re.IGNORECASE):
+                val = min(float(m.group(1)), _EXP_MAX_YEARS)   # clamp in place
+                if is_academic:
+                    fallback_matches.append(val)
+                else:
+                    work_matches.append(val)
+
+    if work_matches:
+        return max(work_matches)
+    if fallback_matches:
+        return max(fallback_matches)
+    return 0.0
 
 
 def extract_education(text: str) -> list:
-    """Extract education qualifications from resume text using DEGREE_PATTERN."""
+    """Extract education qualifications (degrees, diplomas) from resume text."""
     found = []
     for m in DEGREE_PATTERN.finditer(text):
         entry = m.group(0).strip()[:80]

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from flask import Flask, g, request, jsonify
+from flask import Flask, g, request, jsonify, redirect
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
@@ -63,6 +63,10 @@ UPLOAD_BASE   = Path("uploads")
 RESULTS_DIR   = Path("results")
 CONFIG_FILE   = Path("config.json")
 
+# Frontend URL — where the Vite / React app is served.
+# Override via the FRONTEND_URL environment variable for production deployments.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+
 UPLOAD_BASE.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -75,7 +79,7 @@ MAX_AUDIT_JD_CHARS      = 120                # truncate JD in audit entries
 MAX_JSONL_ENTRIES       = 500                # max lines per JSONL log
 MAX_CONFIG_BYTES        = 8192               # max POST /api/config payload
 MAX_JD_CHARS            = 4000               # max job description length
-MAX_FILES_PER_SESSION   = 200                # max PDFs per upload session
+MAX_FILES_PER_SESSION   = 100                # max PDFs per upload session (must match frontend MAX_FILES)
 MAX_REQUIRED_SKILLS     = 50                 # max skills list length
 ALLOWED_CONFIG_KEYS     = {"job_description", "required_skills", "model", "scoring"}
 
@@ -86,6 +90,7 @@ RATE_LIMIT_WINDOW_S       = 60     # sliding window for per-IP rate limiting
 RATE_LIMIT_MAX_REQUESTS   = 30     # max requests per IP per window
 SLOW_REQUEST_THRESHOLD_S  = 20.0   # log WARNING if request exceeds this duration
 TASK_TTL_S                = 3600   # async task expiry (1 hour)
+TASK_STORE_LIMIT          = 60     # max in-memory task entries (evict oldest beyond this)
 
 # Allowed embedding models
 VALID_MODELS = {
@@ -196,7 +201,18 @@ _screening_executor = ThreadPoolExecutor(
 
 
 def _task_set(task_id: str, data: dict):
+    """Insert a new task, evicting the oldest entry if the store is at capacity.
+
+    Cap rationale: each completed task holds a full serialised result JSON (up to ~200 KB).
+    Without a cap, 1000 req/hr × 1hr TTL = 1000 entries × 200 KB = 200 MB of in-memory growth
+    between hourly prune cycles.  We bound this to TASK_STORE_LIMIT entries instead.
+    """
     with _task_lock:
+        if len(_task_store) >= TASK_STORE_LIMIT:
+            # Evict the oldest task by created_at (not necessarily FIFO if clocks drift)
+            oldest_id = min(_task_store, key=lambda tid: _task_store[tid].get("created_at", 0))
+            del _task_store[oldest_id]
+            logger.debug("[Tasks] Task store cap (%d) reached — evicted oldest: %s", TASK_STORE_LIMIT, oldest_id)
         _task_store[task_id] = data
 
 
@@ -642,7 +658,10 @@ def _run_screening_pipeline(
             per_model_similarities = {}
             semantic_ok            = False
 
-        similarity_map = {r["filename"]: r["similarity_score"] for r in similarity_results}
+        similarity_map     = {r["filename"]: r["similarity_score"] for r in similarity_results}
+        # Propagate OOM fallback flag — candidates whose zero vectors indicate _safe_encode retry
+        # exhaustion will bypass sigmoid calibration and be forced to semantic_score=0.0 in scoring.
+        oom_fallback_map   = {r["filename"]: r.get("oom_fallback", False) for r in similarity_results}
 
         # Best similarity across merged source files
         for fname, info in extracted.items():
@@ -720,6 +739,7 @@ def _run_screening_pipeline(
                 "filename":               fname,
                 "info":                   info,
                 "semantic_score":         similarity_map.get(fname, 0.0),
+                "oom_fallback":           oom_fallback_map.get(fname, False),
                 "semantic_skill_matches": semantic_skill_map.get(fname, set()),
                 "resume_text":            resume_texts.get(fname, ""),
             }
@@ -795,6 +815,19 @@ def _run_screening_pipeline(
 
 
 # Routes
+
+
+@app.route("/", methods=["GET"])
+def index():
+    """
+    Root redirect — visiting the Flask backend URL in a browser sends the user
+    straight to the React frontend.
+
+    Target URL is read from the FRONTEND_URL env-var (default: http://localhost:5173)
+    so the redirect works for both local development and production deployments.
+    """
+    return redirect(FRONTEND_URL, code=302)
+
 
 # Allowed IPs for /api/health — empty means allow all (default for local dev)
 _HEALTH_ALLOWED_IPS: set = {
@@ -1048,7 +1081,22 @@ def screen():
             return jsonify(result), 500
         return jsonify(result), 200
 
-    _screening_executor.submit(_worker)
+    # Async mode — submit to ThreadPoolExecutor
+    # Wrap in try/except: if submit() itself raises (e.g. executor is shut down),
+    # _worker's finally block never runs and _active_screenings permanently leaks.
+    try:
+        _screening_executor.submit(_worker)
+    except Exception as submit_exc:
+        with _active_screenings_lock:
+            _active_screenings = max(0, _active_screenings - 1)
+        _task_update(task_id, {
+            "status": "error",
+            "result": {"error": f"Failed to queue screening task: {submit_exc}", "candidates": []},
+            "finished_at": time.time(),
+        })
+        logger.error("[%s] Executor submit failed: %s", req_id, submit_exc)
+        return jsonify({"error": "Server is busy or shutting down. Please retry."}), 503
+
     logger.info("[%s] Task %s submitted (session %s, model %s)", req_id, task_id, session_id, model_key)
 
     return jsonify({

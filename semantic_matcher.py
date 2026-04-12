@@ -34,6 +34,11 @@ SKILL_THRESHOLD_BY_MODEL = {
     ARCTIC_MODEL: 0.72,
 }
 
+# Models that use asymmetric retrieval training — queries (JD) must use a special prompt prefix.
+# Resumes are documents: no prefix needed. Omitting the prefix on the JD side collapses cosine
+# similarity into the document subspace and produces scores 40-60% lower than intended.
+_QUERY_PROMPT_MODELS: frozenset = frozenset({ARCTIC_MODEL})
+
 CHUNK_SIZE   = 300
 CHUNK_STRIDE = 50
 
@@ -45,7 +50,7 @@ _cache_lock = threading.Lock()
 _loading_locks: Dict[str, threading.Lock] = {}
 _loading_locks_meta = threading.Lock()
 
-# JD embedding cache — md5(jd + model_name) key, FIFO eviction at 32 entries
+# JD embedding cache — sha256(jd + model_name) key, FIFO eviction at 32 entries
 _jd_cache: Dict[str, np.ndarray] = {}
 _jd_cache_lock = threading.Lock()
 _JD_CACHE_MAX = 32
@@ -104,6 +109,9 @@ def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
                 elif torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 logger.info("[SemanticMatcher] Evicted model '%s' from cache.", evicted_name)
+                # Remove the per-model loading lock — the model is gone, the lock is dead weight
+                with _loading_locks_meta:
+                    _loading_locks.pop(evicted_name, None)
 
             _model_cache[model_name] = model
             logger.info(
@@ -122,13 +130,19 @@ def _preprocess(text: str) -> str:
 
 
 def _extract_key_sections(text: str) -> str:
-    """Extract job-relevant sections (skills, experience, projects) from resume text."""
-    # Line must begin with the keyword and be short enough to be a heading — prevents prose false-triggers
+    """Extract job-relevant sections (skills, experience, projects) from resume text.
+
+    Heading detection is intentionally permissive on line length (< 80 chars) and does NOT
+    require the keyword to be the only thing on the line.  Multi-column PDF layouts (Canva,
+    Novoresume, ResumeGenius) frequently produce lines like 'SKILLS Python | React | Node'
+    which the old strict regex missed.  The line-start anchor (^) and the optional-prefix
+    guard (^[\s\-\*•#\d\.]*) prevent prose sentences from being captured as headings.
+    """
     header_pattern = re.compile(
         r"^[\s\-\*•#\d\.]*"
         r"(skills|technical skills|experience|work experience|projects?|"
         r"summary|objective|internship|achievements?|certifications?)"
-        r"[\s:]*$",
+        r"[\s:\-|·]*",          # no trailing $ — allow 'SKILLS Python | Java | React'
         re.IGNORECASE,
     )
     stop_pattern = re.compile(
@@ -143,7 +157,9 @@ def _extract_key_sections(text: str) -> str:
         stripped = line.strip()
         if capturing and stop_pattern.match(stripped):
             capturing = False
-        if header_pattern.match(stripped) and len(stripped) < 60:
+        # length cap 80: allows 'SKILLS Python | Java | React Native' (36 chars) but
+        # blocks long prose such as 'Experience has taught me that...' (typically > 80).
+        if header_pattern.match(stripped) and len(stripped) < 80:
             capturing = True
         if capturing:
             key_lines.append(line)
@@ -192,16 +208,25 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, stride: int = CHUNK_STR
     return chunks if chunks else [text]
 
 
-def _pool_chunks(embeddings: np.ndarray) -> np.ndarray:
-    """Mean-max pool a batch of chunk embeddings into a single normalised vector."""
+def _pool_chunks(embeddings: np.ndarray, use_max: bool = True) -> np.ndarray:
+    """Mean-max pool a batch of chunk embeddings into a single normalised vector.
+
+    use_max=True  — mean-max blend (default for MPNet / MxBai).
+    use_max=False — mean-only pooling for models trained with CLS pooling (Arctic)
+                    where max-pooling across chunks produces vectors in a subspace
+                    that misaligns with the JD's CLS-pooled query embedding.
+    """
     if embeddings.ndim == 2 and embeddings.shape[0] == 0:
         return np.zeros(embeddings.shape[1])
     if embeddings.ndim < 2:
         dim = embeddings.shape[-1] if embeddings.size > 0 else 768
         return embeddings.flatten() if embeddings.size > 0 else np.zeros(dim)
     mean_pool = np.mean(embeddings, axis=0)
-    max_pool  = np.max(embeddings, axis=0)
-    combined  = 0.5 * mean_pool + 0.5 * max_pool  # equal mean-max blend
+    if use_max:
+        max_pool = np.max(embeddings, axis=0)
+        combined = 0.5 * mean_pool + 0.5 * max_pool   # equal mean-max blend
+    else:
+        combined = mean_pool                            # mean-only for CLS-trained models
     norm = np.linalg.norm(combined)
     if norm > 0:
         combined = combined / norm
@@ -209,7 +234,7 @@ def _pool_chunks(embeddings: np.ndarray) -> np.ndarray:
 
 
 def embed_text(text: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
-    """Embed a single resume text using chunked mean-max pooling."""
+    """Embed a single resume text using chunked mean-max (or mean-only for Arctic) pooling."""
     model  = _get_model(model_name)
     text   = _preprocess(text)
     chunks = _chunk_text(text)
@@ -233,31 +258,60 @@ def embed_text(text: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
         logger.error("[SemanticMatcher] Encoding failed: %s", exc)
         raise RuntimeError(f"Embedding encoding error: {exc}") from exc
 
-    return _pool_chunks(embeddings)
+    # Arctic uses CLS-pooling training — mean-only avoids misaligned max-pool dimensions
+    use_max = model_name not in _QUERY_PROMPT_MODELS
+    return _pool_chunks(embeddings, use_max=use_max)
 
 
 def embed_job_description(jd: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
-    """Embed a job description with FIFO-capped caching to avoid redundant inference."""
-    cache_key = hashlib.md5((jd + model_name).encode()).hexdigest()
+    """Embed a job description via chunking + mean-max pooling, with FIFO-capped caching.
+
+    JD is treated identically to a resume (chunked + pooled) so long job descriptions are
+    never silently truncated mid-token.  For asymmetric retrieval models (currently Arctic)
+    the JD chunks are encoded with prompt_name='query'; resume chunks never use this prefix.
+    """
+    cache_key = hashlib.sha256((jd + model_name).encode()).hexdigest()
 
     with _jd_cache_lock:
         if cache_key in _jd_cache:
             logger.debug("[SemanticMatcher] JD cache hit for model '%s'.", model_name)
             return _jd_cache[cache_key]
 
-    # Encode outside the lock — ~300ms inference must not block other threads
+    # Encode outside the lock — inference must not block other threads
     model    = _get_model(model_name)
     jd_clean = _preprocess(jd)
+    chunks   = _chunk_text(jd_clean)
+
+    # Asymmetric retrieval models (Arctic) require a query-side prompt prefix on the JD.
+    # Resumes are documents — they must NOT carry this prefix or similarity space breaks.
+    is_query_model = model_name in _QUERY_PROMPT_MODELS
+    encode_kwargs  = dict(convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=True)
+    if is_query_model:
+        encode_kwargs["prompt_name"] = "query"
+        logger.debug(
+            "[SemanticMatcher] Arctic asymmetric mode — encoding JD (%d chunk(s)) with query prefix.",
+            len(chunks),
+        )
+    else:
+        logger.debug(
+            "[SemanticMatcher] Encoding JD for '%s' — %d chunk(s).", model_name, len(chunks)
+        )
+
     try:
-        emb = model.encode(
-            [jd_clean],
-            convert_to_numpy=True,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )[0]
+        # normalize_embeddings=True → individual chunk vectors are unit-normalised before pooling.
+        # _pool_chunks then re-normalises the blended mean+max vector — no double normalisation
+        # issue because the two normalisation steps are on different objects (chunks vs pool result).
+        chunk_embs = model.encode(chunks, **encode_kwargs)
     except Exception as exc:
         logger.error("[SemanticMatcher] JD encoding failed: %s", exc)
         raise RuntimeError(f"Job description encoding error: {exc}") from exc
+
+    # Match the pooling strategy used for resume embeddings:
+    # Arctic is CLS-pool trained — mean-only for both JD and resume keeps the
+    # embedding spaces aligned.  Mixing strategies (mean-max JD vs mean resume)
+    # would introduce an artificial metric asymmetry.
+    use_max = model_name not in _QUERY_PROMPT_MODELS
+    emb = _pool_chunks(chunk_embs, use_max=use_max)  # → unit-normalised pooled vector
 
     with _jd_cache_lock:
         if len(_jd_cache) >= _JD_CACHE_MAX:
@@ -316,6 +370,9 @@ def rank_resumes_by_similarity(
         len(full_chunks), len(key_chunks),
     )
 
+    # Arctic uses CLS-pooling training — mean-only pooling avoids dimension misalignment
+    _use_max_pool = model_name not in _QUERY_PROMPT_MODELS
+
     # MxBai is 2× heavier than MPNet — use smaller batches to prevent OOM
     _batch_size = (16 if len(full_chunks) > 200 else 32) if model_name == MXBAI_MODEL else (32 if len(full_chunks) > 500 else 64)
 
@@ -362,17 +419,39 @@ def rank_resumes_by_similarity(
 
     for i, filename in enumerate(filenames):
         f_start, f_end = full_offsets[i]
-        full_score     = cosine_similarity(_pool_chunks(all_full_embs[f_start:f_end]), jd_emb)
-
         k_start, k_end = key_offsets[i]
-        key_score      = cosine_similarity(_pool_chunks(all_key_embs[k_start:k_end]), jd_emb)
 
-        combined = float(np.clip(0.40 * full_score + 0.60 * key_score, 0.0, 1.0))  # 40% full + 60% key sections
+        # Known-empty resumes: offsets are equal (no chunks were added)
+        is_empty = (f_start == f_end)
 
-        results.append({"filename": filename, "similarity_score": round(combined, 4)})
+        if is_empty:
+            results.append({"filename": filename, "similarity_score": 0.0, "oom_fallback": False})
+            continue
+
+        full_emb = _pool_chunks(all_full_embs[f_start:f_end], use_max=_use_max_pool)
+        key_emb  = _pool_chunks(all_key_embs[k_start:k_end],  use_max=_use_max_pool)
+
+        # Both jd_emb and pooled resume embeddings are unit-normalised → dot product == cosine similarity.
+        # Avoids redundant np.linalg.norm() calls that cosine_similarity() would perform.
+        full_score = float(np.clip(np.dot(full_emb, jd_emb), 0.0, 1.0))
+        key_score  = float(np.clip(np.dot(key_emb,  jd_emb), 0.0, 1.0))
+
+        combined = float(np.clip(0.40 * full_score + 0.60 * key_score, 0.0, 1.0))  # 40% full + 60% key
+
+        # OOM suspect: non-empty resume produced a zero combined score.
+        # _safe_encode returns zero vectors on exhausted retry — they produce 0.0 similarity.
+        # Mark these so score_candidates excludes them from sigmoid calibration and forces 0.0.
+        oom_suspect = combined == 0.0
+
+        results.append({
+            "filename":         filename,
+            "similarity_score": round(combined, 4),
+            "oom_fallback":     oom_suspect,
+        })
         logger.debug(
-            "[SemanticMatcher] %s — full=%.3f key=%.3f final=%.3f",
+            "[SemanticMatcher] %s — full=%.3f key=%.3f final=%.3f%s",
             filename, full_score, key_score, combined,
+            " [OOM?]" if oom_suspect else "",
         )
 
     results.sort(key=lambda x: x["similarity_score"], reverse=True)

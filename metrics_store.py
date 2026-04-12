@@ -19,7 +19,7 @@ logger = logging.getLogger("metrics_store")
 
 METRICS_LOG_FILE = Path("metrics_log.jsonl")
 EMBEDDINGS_FILE  = Path("embeddings_store.json")
-MAX_METRICS_ENTRIES = 500  # Oldest entries pruned once this limit is exceeded
+MAX_METRICS_ENTRIES = 500  # oldest entries pruned when the log exceeds this many lines
 
 _metrics_write_lock = threading.Lock()  # Protects concurrent JSONL writes from worker threads
 
@@ -258,6 +258,12 @@ def _print_run_detail(run: dict) -> None:
     print()
 
 
+def _avg_stat(runs: list[dict], key: str, stat: str) -> float:
+    """Return the mean of runs[*][key][stat], ignoring runs where key is absent."""
+    vals = [r.get(key, {}).get(stat, 0.0) for r in runs if r.get(key)]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
 def print_compare() -> None:
     """Print a cross-run comparison table grouped by model."""
     runs = load_all_runs()
@@ -279,19 +285,13 @@ def print_compare() -> None:
     print("  " + "-" * 60)
 
     for model, model_runs in sorted(by_model.items()):
-
-        def _avg(key: str, stat: str) -> float:
-            """Average a stat field across all runs for this model."""
-            vals = [r.get(key, {}).get(stat, 0.0) for r in model_runs if r.get(key)]
-            return sum(vals) / len(vals) if vals else 0.0
-
         print(
             f"  {model:<10} "
             f"{len(model_runs):>5}  "
-            f"{_avg('stats', 'mean'):>9.4f}  "
-            f"{_avg('final_score_stats', 'mean'):>9.4f}  "
-            f"{_avg('skill_score_stats', 'mean'):>9.4f}  "
-            f"{_avg('semantic_score_stats', 'mean'):>7.4f}"
+            f"{_avg_stat(model_runs, 'stats',              'mean'):>9.4f}  "
+            f"{_avg_stat(model_runs, 'final_score_stats',  'mean'):>9.4f}  "
+            f"{_avg_stat(model_runs, 'skill_score_stats',  'mean'):>9.4f}  "
+            f"{_avg_stat(model_runs, 'semantic_score_stats','mean'):>7.4f}"
         )
 
     print()

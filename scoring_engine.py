@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import math
 import re
 
 from dataclasses import dataclass, field
@@ -91,11 +92,29 @@ SKILL_ALIASES = {
     "nodejs":               ["nodejs", "node", "node.js", "npm"],
 }
 
-# Per-model calibrated defaults — used as the ±10% clamp centre for the dynamic threshold
+# Per-model eligibility threshold defaults.
+# The dynamic threshold (60th percentile) is clamped within ±10% of these values
+# to prevent extreme score distributions from pushing the cutoff out of range.
 MODEL_THRESHOLDS = {
     "mpnet":  0.45,
     "mxbai":  0.55,
     "arctic": 0.50,
+}
+
+# Sigmoid calibration maps each model's raw cosine similarity range onto [0, 1].
+# Different models output similarity in different numeric ranges:
+#   MPNet  → ~0.30 – 0.65
+#   MxBai  → ~0.35 – 0.70
+#   Arctic → ~0.15 – 0.40  (smaller because it uses asymmetric retrieval training)
+# Min-max normalisation across a single batch inflates noise when all candidates
+# score within 0.03 of each other.  Sigmoid with a per-model center preserves
+# ranking order while placing scores on a shared probabilistic scale.
+# scale=8 gives ~90% of the [0,1] range within ±0.15 of center — sufficient
+# discrimination without clipping legitimate outliers.
+SEM_CALIBRATION = {
+    "mpnet":  {"center": 0.45, "scale": 8.0},
+    "mxbai":  {"center": 0.50, "scale": 8.0},
+    "arctic": {"center": 0.32, "scale": 8.0},
 }
 
 # Matches negation phrases directly before a skill mention ("no experience in X", "not skilled in X")
@@ -106,7 +125,24 @@ _NEGATION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-_NEGATION_WINDOW = 80  # Characters before the skill mention to check for negation context
+# Characters before a skill mention to search for negation phrasing.
+_NEGATION_WINDOW = 80
+
+# Module-level compiled-regex cache for skill boundary patterns.
+# _is_skill_match builds r"\b<skill>\b" patterns on the fly; without caching
+# Python recompiles the same pattern for every candidate × every required skill
+# ({cands} × {req_skills} × {aliases} iterations per screening run).
+# With a dict cache each unique skill string compiles its pattern exactly once.
+_regex_cache: dict[str, re.Pattern] = {}
+
+
+def _skill_re(term: str) -> re.Pattern:
+    """Return a compiled word-boundary regex for term, building it on first use."""
+    pat = _regex_cache.get(term)
+    if pat is None:
+        pat = re.compile(r"\b" + re.escape(term) + r"\b")
+        _regex_cache[term] = pat
+    return pat
 
 
 def _has_negation_context(resume_text_lower: str, skill_term: str) -> bool:
@@ -117,6 +153,18 @@ def _has_negation_context(resume_text_lower: str, skill_term: str) -> bool:
         if _NEGATION_PATTERNS.search(context):
             return True
     return False
+
+
+def _sigmoid_calibrate(raw: float, model_key: str) -> float:
+    """Map a raw cosine similarity score onto [0, 1] via per-model sigmoid.
+
+    Rationale: raw cosine ranges differ per model (Arctic ~0.15–0.40, MPNet ~0.30–0.65).
+    Sigmoid centering on the model's expected neutral-match score maps the natural similarity
+    distribution onto a stable [0, 1] interval without amplifying noise in tight batches.
+    """
+    p   = SEM_CALIBRATION.get(model_key, {"center": 0.45, "scale": 8.0})
+    val = 1.0 / (1.0 + math.exp(-p["scale"] * (raw - p["center"])))
+    return round(val, 6)
 
 
 def get_dynamic_threshold(final_scores: list, model_key: str = "mpnet") -> float:
@@ -142,40 +190,52 @@ def _tokenise_skill(skill: str) -> set:
 
 
 def _is_skill_match(req_lower: str, candidate_lower: set) -> bool:
-    """Return True if req_lower matches any candidate skill via exact, alias, substring, or token overlap."""
+    """Return True if req_lower matches any candidate skill via exact, alias, substring, or token overlap.
+
+    Match hierarchy (first hit wins):
+      1. Exact normalised match.
+      2. Alias exact match.
+      3. Word-boundary substring match (both directions).
+      4. Token overlap ≥ 2/3 of required-skill tokens.
+    Patterns are retrieved from _regex_cache and compiled at most once per unique term.
+    """
     if req_lower in candidate_lower:
         return True
 
-    aliases = SKILL_ALIASES.get(req_lower, [req_lower])
-    alias_norm = {_normalise_skill_text(a) for a in aliases}
+    aliases     = SKILL_ALIASES.get(req_lower, [req_lower])
+    alias_norms = [_normalise_skill_text(a) for a in aliases]
 
-    if candidate_lower.intersection(alias_norm):
+    # Alias exact match
+    if candidate_lower.intersection(alias_norms):
         return True
 
     req_tokens = _tokenise_skill(req_lower)
+
     for cand in candidate_lower:
+        # Word-boundary substring match (both directions)
         if len(req_lower) >= 4:
-            if re.search(r"\b" + re.escape(req_lower) + r"\b", cand):
+            if _skill_re(req_lower).search(cand):
                 return True
-            if len(cand) >= 4 and re.search(r"\b" + re.escape(cand) + r"\b", req_lower):
+            if len(cand) >= 4 and _skill_re(cand).search(req_lower):
                 return True
 
+        # Token overlap: at least 2/3 of the required skill's tokens must appear in the candidate
         cand_tokens = _tokenise_skill(cand)
         if req_tokens and len(req_tokens) > 1:
-            overlap = len(req_tokens & cand_tokens) / len(req_tokens)
-            if overlap >= 0.67:  # 2/3 token overlap required to avoid partial-word false positives
+            if len(req_tokens & cand_tokens) / len(req_tokens) >= 0.67:
                 return True
 
-        for alias in alias_norm:
-            if len(alias) >= 4:
-                if re.search(r"\b" + re.escape(alias) + r"\b", cand):
+        # Same checks for each alias
+        for alias, alias_norm in zip(aliases, alias_norms):
+            _ = alias  # alias string kept for readability; alias_norm is used for matching
+            if len(alias_norm) >= 4:
+                if _skill_re(alias_norm).search(cand):
                     return True
-                if len(cand) >= 4 and re.search(r"\b" + re.escape(cand) + r"\b", alias):
+                if len(cand) >= 4 and _skill_re(cand).search(alias_norm):
                     return True
-            alias_tokens = _tokenise_skill(alias)
+            alias_tokens = _tokenise_skill(alias_norm)
             if alias_tokens and len(alias_tokens) > 1:
-                overlap = len(alias_tokens & cand_tokens) / len(alias_tokens)
-                if overlap >= 0.67:
+                if len(alias_tokens & cand_tokens) / len(alias_tokens) >= 0.67:
                     return True
 
     return False
@@ -263,14 +323,38 @@ def score_candidates(candidates: list, required_skills: list,
         len(candidates), config.skill_weight, config.semantic_weight, config.exp_weight,
     )
 
+    # ── Pre-pass: Sigmoid-calibrate semantic scores per model ─────────────────
+    # OOM-fallback candidates (zero vectors from _safe_encode retry exhaustion) are
+    # forced to semantic_score=0.0 and excluded from calibration to avoid artificially
+    # boosting them via the sigmoid curve.
+    # All other candidates are mapped through _sigmoid_calibrate which normalises the
+    # model-specific cosine range onto [0,1] without amplifying noise in tight batches.
+    calibrated_sems: dict[str, float] = {}
+    raw_values = []
+    for c in candidates:
+        fname   = c.get("filename", "")
+        raw_sem = float(min(max(c.get("semantic_score", 0.0), 0.0), 1.0))
+        if c.get("oom_fallback", False):
+            calibrated_sems[fname] = 0.0
+            logger.warning("[scoring_engine] OOM fallback for %s — semantic_score forced to 0.0", fname)
+        else:
+            calibrated_sems[fname] = _sigmoid_calibrate(raw_sem, model_key)
+            raw_values.append(raw_sem)
+
+    if raw_values:
+        logger.info(
+            "[scoring_engine] Sigmoid calibration (%s) — raw sem range [%.4f, %.4f]",
+            model_key, min(raw_values), max(raw_values),
+        )
+
     # ── Pass 1: Component scores and hard eligibility ─────────────────────────
     raw_results = []
 
     for c in candidates:
-        info           = c.get("info", {})
-        semantic_score = min(max(c.get("semantic_score", 0.0), 0.0), 1.0)
-        filename       = c.get("filename", "")
-        resume_text    = c.get("resume_text", "")       # passed through for negation detection
+        info                   = c.get("info", {})
+        filename               = c.get("filename", "")
+        semantic_score         = calibrated_sems.get(filename, 0.0)
+        resume_text            = c.get("resume_text", "")     # for negation detection
         semantic_skill_matches = c.get("semantic_skill_matches", None)
 
         skill_score, matched_skills, missing_skills, semantic_only, negated_skills = _skill_score(

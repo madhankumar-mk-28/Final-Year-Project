@@ -11,7 +11,9 @@ import {
     RadarChart, PolarGrid, PolarAngleAxis, Radar,
 } from "recharts";
 
-// Colours follow Tailwind CSS v3 tokens
+// ── Theme palettes ─────────────────────────────────────────────────────────
+// Pure inline-style design tokens (no Tailwind). Switch via the `dark` state
+// in App. All component colours read from the module-level `C` ref below.
 const DARK = {
     bg: "#09090b", surface: "rgba(255,255,255,0.04)", border: "rgba(255,255,255,0.09)",
     text: "#f4f4f5", sub: "#71717a", muted: "#52525b",
@@ -23,17 +25,46 @@ const DARK = {
     chartSkill: "#818cf8", chartSemantic: "#34d399", chartFinal: "#fbbf24",
 };
 const LIGHT = {
-    bg: "#c8cdd5", surface: "#d2d7df", border: "rgba(0,0,0,0.11)",
-    text: "#1e2533", sub: "#374151", muted: "#5c6878",
-    blue: "#4338ca", green: "#166534", amber: "#a16207", pink: "#be185d", teal: "#0f766e",
-    sidebarBg: "#bcc2cb", topbarBg: "rgba(200,205,213,0.95)",
-    inputBg: "rgba(0,0,0,0.06)", cardText: "#2d3748",
-    drawerBg: "#c4c9d1", scrollThumb: "rgba(0,0,0,0.14)",
-    chartTooltip: "#e2e6ea", tableFocus: "rgba(67,56,202,0.06)",
-    chartSkill: "#4338ca", chartSemantic: "#166534", chartFinal: "#a16207",
+    // Page & surface ── white-based palette; cards pop against the warm grey page
+    bg:       "#f0f2f5",               // warm light grey page backdrop
+    surface:  "#ffffff",               // pure white cards — maximum contrast vs bg
+    border:   "rgba(0,0,0,0.10)",      // subtle 1-px dividers, visible on white
+
+    // Text ── charcoal hierarchy so every level is legible
+    text:     "#111827",               // primary text  — near-black, high contrast
+    sub:      "#374151",               // secondary text — dark grey, still readable
+    muted:    "#6b7280",               // tertiary / captions — passes WCAG AA on white
+    cardText: "#1f2937",               // body text inside cards
+
+    // Accent colours ── vivid but not garish; all readable on white backgrounds
+    blue:     "#4f46e5",               // indigo — primary accent (buttons, links)
+    green:    "#16a34a",               // emerald — shortlisted / success states
+    amber:    "#d97706",               // amber  — warnings / avg-score
+    pink:     "#db2777",               // rose   — "New Screening" quick action
+    teal:     "#0d9488",               // teal   — semantic score / pass rate
+
+    // Chrome ── sidebar, topbar, and drawer share a slightly cooler white tone
+    sidebarBg:  "#f8fafc",             // very light blue-white sidebar
+    topbarBg:   "rgba(255,255,255,0.92)", // frosted-glass topbar
+    drawerBg:   "#ffffff",             // candidate drawer — pure white
+
+    // Inputs & interactive elements
+    inputBg:    "rgba(0,0,0,0.04)",    // subtle input field fill on white cards
+    tableFocus: "rgba(79,70,229,0.06)",// row hover tint matching blue accent
+
+    // Scrollbar thumb
+    scrollThumb: "rgba(0,0,0,0.18)",
+
+    // Chart colours ── darker than dark-mode so they read on white chart backgrounds
+    chartTooltip: "#ffffff",
+    chartSkill:   "#4f46e5",
+    chartSemantic:"#0d9488",
+    chartFinal:   "#d97706",
 };
 
-// Global theme ref — reassigned at the top of each App render
+// `C` is a module-level mutable ref that is synchronously reassigned at the
+// start of every App render cycle (before any child reads it), so all
+// components always read the current theme without prop-drilling.
 let C = DARK;
 
 // Per-model classification thresholds matching scoring_engine.py
@@ -594,9 +625,64 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
         });
     }, []);
 
-    const onDrop = useCallback(e => {
-        e.preventDefault(); setIsDragging(false); addFiles(e.dataTransfer.files);
-    }, [addFiles]);
+    // ── Folder drag-and-drop helpers ─────────────────────────────────────
+    // Recursively collect all .pdf files from a FileSystemEntry (file or directory).
+    // readEntries() only returns ≪100 entries at a time — we loop until empty.
+    const collectPdfsFromEntry = useCallback(async (entry) => {
+        if (!entry) return [];
+        if (entry.isFile) {
+            return new Promise((resolve) => {
+                entry.file(
+                    (f) => {
+                        const isPdf = f.name.toLowerCase().endsWith(".pdf") ||
+                                      f.type === "application/pdf";
+                        resolve(isPdf ? [f] : []);
+                    },
+                    () => resolve([]),  // getFile() error — skip silently
+                );
+            });
+        }
+        if (entry.isDirectory) {
+            const reader = entry.createReader();
+            const allEntries = [];
+            // readEntries batches at ≪100 — keep calling until we get an empty batch
+            await new Promise((resolve) => {
+                const readBatch = () =>
+                    reader.readEntries(
+                        (batch) => { if (!batch.length) return resolve(); allEntries.push(...batch); readBatch(); },
+                        () => resolve(),  // readEntries error — stop gracefully
+                    );
+                readBatch();
+            });
+            const nested = await Promise.all(allEntries.map(collectPdfsFromEntry));
+            return nested.flat();
+        }
+        return [];
+    }, []);
+
+    const folderRef = useRef();
+
+    const onDrop = useCallback(async (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        const items = Array.from(e.dataTransfer.items || []);
+        // Use the FileSystemEntry API when available (Chrome, Firefox, Safari, Edge ≥ 2020)
+        if (items.length && typeof items[0].webkitGetAsEntry === "function") {
+            const entries   = items.map((i) => i.webkitGetAsEntry()).filter(Boolean);
+            const hasFolder = entries.some((en) => en.isDirectory);
+            const allFiles  = (await Promise.all(entries.map(collectPdfsFromEntry))).flat();
+            if (hasFolder && allFiles.length === 0) {
+                showToast("No PDF files found inside the dropped folder", "error");
+            } else {
+                if (hasFolder)
+                    showToast(`Found ${allFiles.length} PDF${allFiles.length !== 1 ? "s" : ""} in folder — adding…`, "success");
+                addFiles(allFiles);
+            }
+        } else {
+            // Fallback for browsers without FileSystemEntry API — flat file list only
+            addFiles(e.dataTransfer.files);
+        }
+    }, [addFiles, collectPdfsFromEntry]);
 
     const canStart = fileItems.length > 0 && jd.trim().length > 10 && backendOnline !== false;
     const activeM = MODELS[activeModel] || MODELS.mpnet;
@@ -642,10 +728,10 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
                 </div>
                 <div>
                     <div style={{ fontSize: 15, fontWeight: 600, color: isDragging ? C.blue : C.cardText }}>
-                        {isDragging ? "Release to upload" : "Drag & drop PDF resumes here"}
+                        {isDragging ? "Release to upload" : "Drag & drop resumes or an entire folder here"}
                     </div>
                     <div style={{ fontSize: 12, color: C.sub, marginTop: 3 }}>
-                        or click to browse — multiple files supported
+                        Folders are scanned recursively for PDFs · use buttons below to browse
                     </div>
                 </div>
                 {/* Limits notice */}
@@ -654,7 +740,35 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
                         <span key={t} style={{ fontSize: 10, color: C.muted, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: "2px 8px" }}>{t}</span>
                     ))}
                 </div>
+                {/* Hidden inputs: one for multi-file, one for whole-folder browse */}
                 <input ref={fileRef} type="file" accept=".pdf" multiple hidden onChange={e => addFiles(e.target.files)} />
+                <input ref={folderRef} type="file" accept=".pdf" /* @ts-ignore */
+                    webkitdirectory="" mozdirectory="" directory="" multiple hidden
+                    onChange={e => addFiles(e.target.files)} />
+                <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                    <button
+                        type="button"
+                        onClick={e => { e.stopPropagation(); fileRef.current.click(); }}
+                        style={{
+                            padding: "5px 14px", borderRadius: 8, fontSize: 11, fontWeight: 600,
+                            background: `${C.blue}14`, border: `1px solid ${C.blue}33`,
+                            color: C.blue, cursor: "pointer", fontFamily: "inherit",
+                        }}
+                    >
+                        Browse Files
+                    </button>
+                    <button
+                        type="button"
+                        onClick={e => { e.stopPropagation(); folderRef.current.click(); }}
+                        style={{
+                            padding: "5px 14px", borderRadius: 8, fontSize: 11, fontWeight: 600,
+                            background: `${C.teal}14`, border: `1px solid ${C.teal}33`,
+                            color: C.teal, cursor: "pointer", fontFamily: "inherit",
+                        }}
+                    >
+                        Browse Folder
+                    </button>
+                </div>
             </div>
 
             {/* Uploaded file list */}
@@ -750,9 +864,7 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
                 </div>
             </div>
 
-            {/*
-              ── MODEL INFO PANEL + SWITCHER ───────────────────────────────────
-            */}
+            {/* Model info card + inline model switcher + run button */}
             <div style={{
                 borderRadius: 16, overflow: "hidden",
                 border: `1px solid ${activeM.color}30`,
@@ -831,7 +943,7 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
     );
 };
 
-const ProcessingView = ({ config, onDone }) => {
+const ProcessingView = ({ config, onDone, onSessionReady }) => {
     const [progress, setProgress] = useState(0);
     const [step, setStep] = useState(0);
     const [status, setStatus] = useState("Connecting to the screening server…");
@@ -903,6 +1015,9 @@ const ProcessingView = ({ config, onDone }) => {
                     throw new Error(e.error || "Upload failed");
                 }
                 const upData = await upRes.json();
+                // Notify App of this session_id immediately — lets it clear the
+                // previous session and register this one for tab-close cleanup.
+                onSessionReady?.(upData.session_id);
                 const savedCount = (upData.saved || []).length;
                 const dupCount = (upData.duplicates || []).length;
                 const rejCount = (upData.rejected || []).length;
@@ -1025,7 +1140,7 @@ const ProcessingView = ({ config, onDone }) => {
                         </svg>
                         <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1 }}>
                             <span style={{ fontSize: 26, fontWeight: 900, color: C.text, lineHeight: 1 }}>{pct}%</span>
-                            <span style={{ fontSize: 9, color: C.sub, textTransform: "uppercase", letterSpacing: ".06em" }}>of 100%</span>
+                            <span style={{ fontSize: 9, color: C.sub, textTransform: "uppercase", letterSpacing: ".06em" }}>complete</span>
                         </div>
                     </div>
                     <div style={{ width: "100%" }}>
@@ -1114,6 +1229,130 @@ const ProcessingView = ({ config, onDone }) => {
     );
 };
 
+// ── Shared sub-components ────────────────────────────────────────────────────
+// Declared before the views that use them to keep declaration order consistent
+// with usage order and to avoid temporal dead zone confusion during analysis.
+
+/**
+ * FieldCard — glass-effect card with a label notched into its top border.
+ * Used throughout Dashboard, Analytics, and Decisions view.
+ *
+ * Props:
+ *   label    {string}  Section title rendered in the notch
+ *   dot      {string}  Accent colour for the small indicator dot (optional)
+ *   children {node}    Card body content
+ *   xtra     {object}  Extra inline style overrides (optional)
+ */
+const FieldCard = ({ label, dot, children, xtra = {} }) => (
+    <div style={{
+        position: "relative",
+        border: `1px solid ${C.border}`,
+        borderRadius: 16,
+        padding: "30px 20px 20px",
+        background: C.surface,
+        backdropFilter: "blur(14px)",
+        WebkitBackdropFilter: "blur(14px)",
+        ...xtra,
+    }}>
+        {/* Notched label sits on top of the border line */}
+        <div style={{
+            position: "absolute", top: -11, left: 16,
+            display: "flex", alignItems: "center", gap: 6,
+            background: C.bg, padding: "0 8px",
+        }}>
+            {dot && <div style={{ width: 6, height: 6, borderRadius: "50%", background: dot, flexShrink: 0 }} />}
+            <span style={{ fontSize: 12, fontWeight: 800, color: C.text, letterSpacing: ".03em" }}>{label}</span>
+        </div>
+        {children}
+    </div>
+);
+
+/**
+ * SoftBar — horizontal progress bar with a glossy highlight layer.
+ *
+ * Props:
+ *   pct   {number}  Fill percentage (0–100)
+ *   color {string}  Bar fill colour
+ *   h     {number}  Bar height in px (default 6)
+ */
+const SoftBar = ({ pct, color, h = 6 }) => (
+    <div style={{ width: "100%", height: h, background: C.inputBg, borderRadius: h, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${Math.max(pct, 1)}%`, background: color, borderRadius: h, opacity: 0.85, transition: "width .8s cubic-bezier(.4,0,.2,1)", position: "relative" }}>
+            {/* Glossy highlight stripe */}
+            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "40%", background: "rgba(255,255,255,0.18)", borderRadius: h }} />
+        </div>
+    </div>
+);
+
+/**
+ * StatPill — compact KPI tile used in the Analytics summary strip.
+ *
+ * Props:
+ *   label {string}  Metric name
+ *   value {string}  Formatted value (e.g. '82%')
+ *   color {string}  Accent colour
+ *   sub   {string}  Optional secondary label
+ */
+const StatPill = ({ label, value, color, sub }) => (
+    <div style={{ padding: "12px 14px", borderRadius: 12, background: C.surface, border: `1px solid ${C.border}`, position: "relative", overflow: "hidden" }}>
+        {/* Top accent gradient line */}
+        <div style={{ position: "absolute", top: 0, left: "25%", right: "25%", height: 1, background: `linear-gradient(90deg,transparent,${color}55,transparent)` }} />
+        <div style={{ fontSize: 20, fontWeight: 900, color, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+        <div style={{ fontSize: 11, fontWeight: 600, color: C.text, marginTop: 4 }}>{label}</div>
+        {sub && <div style={{ fontSize: 9, color: C.muted, marginTop: 1 }}>{sub}</div>}
+    </div>
+);
+
+/**
+ * LiquidTabBar — segmented control with an active-pill highlight.
+ * Used in the Analytics view to switch between Overview / Decisions / Skills tabs.
+ *
+ * Props:
+ *   sections {Array<{id, label}>}  Tab definitions
+ *   active   {string}              Currently active tab id
+ *   onChange {function}            Called with the new tab id on click
+ */
+const LiquidTabBar = ({ sections, active, onChange }) => (
+    <div style={{
+        display: "inline-flex", alignSelf: "flex-start",
+        background: C.inputBg,
+        backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+        border: "1px solid rgba(255,255,255,0.09)",
+        borderRadius: 14, padding: 3, gap: 2,
+        boxShadow: "0 2px 12px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.07)",
+    }}>
+        {sections.map(s => {
+            const on = active === s.id;
+            return (
+                <button key={s.id} onClick={() => onChange(s.id)} style={{
+                    padding: "6px 15px", borderRadius: 11, border: "none",
+                    background: on ? C.surface : "transparent",
+                    color: on ? C.text : C.sub,
+                    fontSize: 12, fontWeight: on ? 700 : 500,
+                    cursor: "pointer", fontFamily: "inherit",
+                    transition: "all .18s cubic-bezier(.4,0,.2,1)",
+                    whiteSpace: "nowrap",
+                    boxShadow: on ? "0 1px 6px rgba(0,0,0,.15)" : "none",
+                }}>{s.label}</button>
+            );
+        })}
+    </div>
+);
+
+// ── Page views ────────────────────────────────────────────────────────────────
+
+/**
+ * DashboardView — landing page after a screening run.
+ * Shows KPI strip, top-candidate card, score-distribution bar chart,
+ * quick-action buttons, and a system info panel.
+ *
+ * Props:
+ *   results      {Array}    Serialised candidate objects from the ML pipeline
+ *   onNav        {function} Navigate to another tab by id
+ *   isMobile     {boolean}  Responsive layout switch (< 768 px)
+ *   activeModel  {string}   Currently selected embedding model key
+ *   onModelChange{function} Switch active embedding model
+ */
 const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange }) => {
     if (!results || results.length === 0) {
         return (
@@ -1138,7 +1377,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
     return (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
-            {/* KPI strip — liquid glass StatPill */}
+            {/* KPI strip — four inline stat tiles */}
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: 10 }}>
                 {[
                     { icon: FileText, label: "Screened", value: results.length, color: C.blue, sub: "resumes processed" },
@@ -1321,14 +1560,21 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
     );
 };
 
+// Medal colour palette for top-3 ranked candidates (gold / silver / bronze).
 const RANK_COLORS = {
     1: { bg: "rgba(255,215,0,.18)", border: "rgba(255,215,0,.45)", text: "#FFD700" },
     2: { bg: "rgba(192,192,192,.18)", border: "rgba(192,192,192,.45)", text: "#C0C0C0" },
     3: { bg: "rgba(205,127,50,.18)", border: "rgba(205,127,50,.45)", text: "#CD7F32" },
 };
 
-// Single helper — used by both the Candidates view and the Analytics Decisions tab.
-// `headers` is an array of column names. `rows` is an array of arrays (one per candidate).
+/**
+ * downloadCSV — builds and triggers a browser download for a CSV file.
+ * Used by both the Candidates view and the Analytics Decisions tab.
+ *
+ * @param {string[]} headers  Column header names
+ * @param {string[][]} rows   One array per candidate, values pre-formatted
+ * @param {string} filename   File name (including .csv extension)
+ */
 function downloadCSV(headers, rows, filename) {
     const csv = [
         headers.join(","),
@@ -1340,13 +1586,23 @@ function downloadCSV(headers, rows, filename) {
     a.href = url;
     a.download = filename;
     a.click();
+    // Release the object URL to free memory
     URL.revokeObjectURL(url);
 }
 
-// Quote a candidate field safely for CSV output.
+/**
+ * csvField — wraps a value in double-quotes and escapes any embedded quotes
+ * with single-quotes so the CSV remains valid if names/emails contain commas.
+ */
 const csvField = (v) => `"${String(v || "").replace(/"/g, "'")}"`;
 
-// Export a shortlisted group with full scores (Analytics → Decisions tab).
+/**
+ * exportDecisionGroup — downloads a CSV of a shortlisted candidate group with
+ * full scoring breakdown. Called from the Analytics → Decisions tab.
+ *
+ * @param {object[]} list       Candidate result objects to export
+ * @param {string}   groupLabel Human-readable group name (used as file prefix)
+ */
 function exportDecisionGroup(list, groupLabel) {
     if (!list?.length) return;
     const headers = ["Rank", "Name", "Email", "Phone", "Final Score", "Skill Score", "Semantic Score"];
@@ -1362,7 +1618,10 @@ function exportDecisionGroup(list, groupLabel) {
     downloadCSV(headers, rows, groupLabel.toLowerCase().replace(/\s+/g, "_") + "_candidates.csv");
 }
 
-// Export shortlisted candidates — rank, name, email, phone only (Candidates view).
+/**
+ * exportToCSV — downloads a lightweight CSV (rank, name, email, phone) of all
+ * shortlisted candidates. Called from the Candidates view export button.
+ */
 function exportToCSV(results) {
     const shortlisted = results.filter(c => c.eligible);
     if (!shortlisted.length) return;
@@ -1376,6 +1635,15 @@ function exportToCSV(results) {
     downloadCSV(headers, rows, "shortlisted_candidates.csv");
 }
 
+/**
+ * CandidatesView — ranked candidate table with filterable rows (All / Shortlisted / Rejected).
+ * Clicking a row opens the Drawer panel with full candidate detail and skill radar.
+ *
+ * Props:
+ *   results  {Array}    Serialised candidate objects from the ML pipeline
+ *   onNav    {function} Navigate to another tab (e.g. redirect to Upload when empty)
+ *   isMobile {boolean}  Responsive layout switch (< 768 px)
+ */
 const CandidatesView = ({ results, onNav, isMobile }) => {
     const [selected, setSelected] = useState(null);
     const [filter, setFilter] = useState("All");
@@ -1482,6 +1750,12 @@ const CandidatesView = ({ results, onNav, isMobile }) => {
     );
 };
 
+/**
+ * JobConfigView — persistent job profile editor.
+ * Saves job description, required skills, and scoring weights to config.json
+ * on the backend so they auto-fill the Upload form on every future session.
+ * No props — reads and writes via GET/POST /api/config.
+ */
 const JobConfigView = () => {
     const [saved, setSaved] = useState(false);
     const [cfg, setCfg] = useState({ jd: "", skills: [], minExp: 0, skillW: 55, semanticW: 45 });
@@ -1629,77 +1903,6 @@ const JobConfigView = () => {
 };
 
 
-
-// Section card with a label notched into the top border
-const FieldCard = ({ label, dot, children, xtra = {} }) => (
-    <div style={{
-        position: "relative",
-        border: `1px solid ${C.border}`,
-        borderRadius: 16,
-        padding: "30px 20px 20px",
-        background: C.surface,
-        backdropFilter: "blur(14px)",
-        WebkitBackdropFilter: "blur(14px)",
-        ...xtra,
-    }}>
-        <div style={{
-            position: "absolute", top: -11, left: 16,
-            display: "flex", alignItems: "center", gap: 6,
-            background: C.bg, padding: "0 8px",
-        }}>
-            {dot && <div style={{ width: 6, height: 6, borderRadius: "50%", background: dot, flexShrink: 0 }} />}
-            <span style={{ fontSize: 12, fontWeight: 800, color: C.text, letterSpacing: ".03em" }}>{label}</span>
-        </div>
-        {children}
-    </div>
-);
-
-// Horizontal progress bar with a soft fill
-const SoftBar = ({ pct, color, h = 6 }) => (
-    <div style={{ width: "100%", height: h, background: C.inputBg, borderRadius: h, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${Math.max(pct, 1)}%`, background: color, borderRadius: h, opacity: 0.85, transition: "width .8s cubic-bezier(.4,0,.2,1)", position: "relative" }}>
-            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "40%", background: "rgba(255,255,255,0.18)", borderRadius: h }} />
-        </div>
-    </div>
-);
-
-// Compact KPI stat tile
-const StatPill = ({ label, value, color, sub }) => (
-    <div style={{ padding: "12px 14px", borderRadius: 12, background: C.surface, border: `1px solid ${C.border}`, position: "relative", overflow: "hidden" }}>
-        <div style={{ position: "absolute", top: 0, left: "25%", right: "25%", height: 1, background: `linear-gradient(90deg,transparent,${color}55,transparent)` }} />
-        <div style={{ fontSize: 20, fontWeight: 900, color, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{value}</div>
-        <div style={{ fontSize: 11, fontWeight: 600, color: C.text, marginTop: 4 }}>{label}</div>
-        {sub && <div style={{ fontSize: 9, color: C.muted, marginTop: 1 }}>{sub}</div>}
-    </div>
-);
-
-// Segmented tab bar with active-pill highlight
-const LiquidTabBar = ({ sections, active, onChange }) => (
-    <div style={{
-        display: "inline-flex", alignSelf: "flex-start",
-        background: C.inputBg,
-        backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
-        border: "1px solid rgba(255,255,255,0.09)",
-        borderRadius: 14, padding: 3, gap: 2,
-        boxShadow: "0 2px 12px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.07)",
-    }}>
-        {sections.map(s => {
-            const on = active === s.id;
-            return (
-                <button key={s.id} onClick={() => onChange(s.id)} style={{
-                    padding: "6px 15px", borderRadius: 11, border: "none",
-                    background: on ? C.surface : "transparent",
-                    color: on ? C.text : C.sub,
-                    fontSize: 12, fontWeight: on ? 700 : 500,
-                    cursor: "pointer", fontFamily: "inherit",
-                    transition: "all .18s cubic-bezier(.4,0,.2,1)",
-                    whiteSpace: "nowrap",
-                    boxShadow: on ? "0 1px 6px rgba(0,0,0,.15)" : "none",
-                }}>{s.label}</button>
-            );
-        })}
-    </div>
-);
 
 const ModelEvalMetrics = ({ results, activeModel, onNavDecisions }) => {
     const ev = useMemo(() => {
@@ -1879,6 +2082,19 @@ const ModelEvalMetrics = ({ results, activeModel, onNavDecisions }) => {
 };
 
 
+/**
+ * AnalyticsView — deep analytics across three tabs:
+ *   • Overview   — score distribution, bands, top-10 chart, talent quadrant
+ *   • Decisions  — hiring shortlist, borderline review, rejection log with export
+ *   • Skills     — skill coverage, gap analysis, top-3 radar comparison
+ * Also renders ModelEvalMetrics (precision/recall/F1 approximations).
+ *
+ * Props:
+ *   results     {Array}    Serialised candidate objects from the ML pipeline
+ *   isMobile    {boolean}  Responsive layout switch (< 768 px)
+ *   onNav       {function} Navigate to another tab
+ *   activeModel {string}   Currently selected embedding model key
+ */
 const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
     const [tab, setTab] = useState("overview");
     const [activeBand, setActiveBand] = useState(null);
@@ -2717,6 +2933,18 @@ const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
 };
 
 // Defined outside App() to prevent remounting on every parent render
+/**
+ * SidebarContent — rendered inside both the persistent desktop sidebar and the
+ * mobile slide-in drawer. Shows the nav items, backend status indicator, and
+ * a live results count badge when candidates are available.
+ *
+ * Props:
+ *   navItems      {Array}    Navigation item definitions
+ *   nav           {string}   Currently active tab id
+ *   go            {function} Navigate to a tab
+ *   backendOnline {boolean|null} null = checking, true = online, false = offline
+ *   results       {Array}    Used to show a candidate count badge on the sidebar
+ */
 const SidebarContent = ({ navItems, nav, go, backendOnline, results }) => (
     <>
         {/* Logo */}
@@ -2782,6 +3010,22 @@ const SidebarContent = ({ navItems, nav, go, backendOnline, results }) => (
     </>
 );
 
+/**
+ * App — root component. Owns all shared state:
+ *   • dark / light theme toggle
+ *   • active navigation tab
+ *   • screeningConfig  — parameters passed from UploadView to ProcessingView
+ *   • results          — serialised candidate output from the ML pipeline
+ *   • activeModel      — selected embedding model key (mpnet / mxbai / arctic)
+ *   • activeSessionRef — ref tracking the backend session_id for disk cleanup
+ *
+ * Session lifecycle:
+ *   1. UploadView calls handleStartScreening → clears any previous session.
+ *   2. ProcessingView uploads files, calls onSessionReady(session_id) → stored in ref.
+ *   3. On success, handleProcessingDone clears the session (PDFs no longer needed).
+ *   4. On tab close/refresh, pagehide + beforeunload fire sendBeacon to clear the session.
+ *   5. Backend hourly sweeper is the final backstop for anything missed.
+ */
 export default function App() {
     const [dark, setDark] = useState(true);
     const [nav, setNav] = useState("upload");
@@ -2856,19 +3100,72 @@ export default function App() {
         return () => document.removeEventListener("navTo", handler);
     }, [go]);
 
-    const handleStartScreening = cfg => {
+    // Tracks the session_id of the currently active upload — never held in
+    // state (avoids re-renders); updated by ProcessingView via onSessionReady.
+    const activeSessionRef = useRef(null);
+
+    // Fire-and-forget DELETE of a session's uploads + result file from disk.
+    // Called in three situations: new screening starts, results arrive, tab closes.
+    const clearSession = useCallback((sid) => {
+        if (!sid) return;
+        fetch(`${BASE}/api/clear`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sid }),
+        }).catch(() => {}); // swallow — cleanup is best-effort
+    }, []);
+
+    // On tab close / refresh / navigation away, fire sendBeacon so the browser
+    // can dispatch the request even after the JS context is being torn down.
+    // pagehide is preferred over beforeunload because it fires on bfcache too.
+    useEffect(() => {
+        const handleUnload = () => {
+            const sid = activeSessionRef.current;
+            if (!sid) return;
+            const blob = new Blob(
+                [JSON.stringify({ session_id: sid })],
+                { type: "application/json" }
+            );
+            navigator.sendBeacon(`${BASE}/api/clear`, blob);
+        };
+        window.addEventListener("pagehide", handleUnload);
+        window.addEventListener("beforeunload", handleUnload);
+        return () => {
+            window.removeEventListener("pagehide", handleUnload);
+            window.removeEventListener("beforeunload", handleUnload);
+        };
+    }, []); // activeSessionRef is a ref — always read current value, no dep needed
+
+    // Called by ProcessingView the moment /api/upload-resumes returns.
+    // Lets App track this session for cleanup before screening even finishes.
+    const handleSessionReady = useCallback((sid) => {
+        activeSessionRef.current = sid;
+    }, []);
+
+    const handleStartScreening = useCallback((cfg) => {
+        // Clear any leftover session from the previous run before starting a new one.
+        if (activeSessionRef.current) {
+            clearSession(activeSessionRef.current);
+            activeSessionRef.current = null;
+        }
         setScreeningConfig(cfg);
         setNav("processing");
         setSidebarOpen(false);
-    };
+    }, [clearSession]);
 
-    const handleProcessingDone = apiResults => {
+    const handleProcessingDone = useCallback((apiResults) => {
+        // Uploads are no longer needed once results are in memory — clear them now.
+        // Result JSON stays in results/ on the backend; only the PDFs are removed.
+        if (activeSessionRef.current) {
+            clearSession(activeSessionRef.current);
+            activeSessionRef.current = null;
+        }
         const r = apiResults || [];
         setResults(r);
         // Only redirect to upload if nothing was processed at all.
         // If results exist but all are rejected, still go to dashboard.
         setNav(r.length > 0 ? "dashboard" : "upload");
-    };
+    }, [clearSession]);
 
     // Switch active model, notify backend, and navigate to Upload for fresh screening
     const handleModelChange = async (key) => {
@@ -2894,7 +3191,7 @@ export default function App() {
             case "upload":
                 return <UploadView onStartScreening={handleStartScreening} activeModel={activeModel} onModelChange={handleModelChange} isMobile={isMobile} backendOnline={backendOnline} />;
             case "processing":
-                return <ProcessingView config={screeningConfig} onDone={handleProcessingDone} />;
+                return <ProcessingView config={screeningConfig} onDone={handleProcessingDone} onSessionReady={handleSessionReady} />;
             case "config":
                 return <JobConfigView />;
             case "candidates":

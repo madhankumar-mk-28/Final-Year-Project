@@ -1,6 +1,7 @@
 .venv/
 Resumes/
 *.DS_Store
+.DS_Store
 __pycache__/
 *.pyc
 uploads/
@@ -9,5 +10,9 @@ results/
 embeddings_store.json
 node_modules/
 dist/
+build/
 .env
-
+last_results.json
+config.json
+*.tmp
+.vscode/
