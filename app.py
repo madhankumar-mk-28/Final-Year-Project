@@ -45,6 +45,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("app")
 
+# Suppress werkzeug's per-request access log — keeps terminal readable during ML pipeline
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 # Flask app + CORS
 app = Flask(__name__, static_folder="frontend/build", static_url_path="/")
 
@@ -678,13 +681,17 @@ def _run_screening_pipeline(
             try:
                 _skill_model = _sm_get_model(model_name)
 
-                # Encode required skills once; batch-encode all unique candidate skills
-                req_skill_embs = _skill_model.encode(
-                    required_skills,
-                    convert_to_numpy=True,
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
+                # Arctic is asymmetric: required skills are the "query" side, candidate
+                # skills are the "document" side. Without the query prefix, both land in
+                # document space and soft-skill cosines inflate to ~0.80+ for everything.
+                _skill_req_kwargs = dict(
+                    convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False,
                 )
+                if model_name == ARCTIC_MODEL:
+                    _skill_req_kwargs["prompt_name"] = "query"
+
+                # Encode required skills once; batch-encode all unique candidate skills
+                req_skill_embs = _skill_model.encode(required_skills, **_skill_req_kwargs)
                 unique_skills = list(dict.fromkeys(
                     skill
                     for info in extracted.values()

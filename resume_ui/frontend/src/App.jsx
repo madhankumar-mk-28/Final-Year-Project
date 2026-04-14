@@ -28,7 +28,7 @@ const LIGHT = {
     // Page & surface ── white-based palette; cards pop against the warm grey page
     bg:       "#f0f2f5",               // warm light grey page backdrop
     surface:  "#ffffff",               // pure white cards — maximum contrast vs bg
-    border:   "rgba(0,0,0,0.10)",      // subtle 1-px dividers, visible on white
+    border:   "rgba(0,0,0,0.14)",      // subtle 1-px dividers, visible on white
 
     // Text ── charcoal hierarchy so every level is legible
     text:     "#111827",               // primary text  — near-black, high contrast
@@ -49,7 +49,7 @@ const LIGHT = {
     drawerBg:   "#ffffff",             // candidate drawer — pure white
 
     // Inputs & interactive elements
-    inputBg:    "rgba(0,0,0,0.04)",    // subtle input field fill on white cards
+    inputBg:    "rgba(0,0,0,0.08)",    // subtle input field fill on white cards
     tableFocus: "rgba(79,70,229,0.06)",// row hover tint matching blue accent
 
     // Scrollbar thumb
@@ -868,7 +868,7 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
             <div style={{
                 borderRadius: 16, overflow: "hidden",
                 border: `1px solid ${activeM.color}30`,
-                background: `${activeM.color}06`,
+                background: `${activeM.color}12`,
             }}>
                 {/* Model info header */}
                 <div style={{ padding: "16px 20px", display: "flex", alignItems: "flex-start", gap: 14, borderBottom: `1px solid ${activeM.color}18` }}>
@@ -1317,7 +1317,7 @@ const LiquidTabBar = ({ sections, active, onChange }) => (
         display: "inline-flex", alignSelf: "flex-start",
         background: C.inputBg,
         backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
-        border: "1px solid rgba(255,255,255,0.09)",
+        border: `1px solid ${C.border}`,
         borderRadius: 14, padding: 3, gap: 2,
         boxShadow: "0 2px 12px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.07)",
     }}>
@@ -1523,7 +1523,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                             { step: "4", label: "Cosine Similarity", desc: "Two-pass scoring: 40% full-resume embedding + 60% key-sections (Skills, Experience, Projects). Dot product with JD vector gives the semantic score.", color: C.amber },
                             { step: "5", label: "Weighted Ranking", desc: `Final Score = (Skill × Skill Score) + (Semantic × Semantic Score). Default weights: ${MODELS[activeModel || "mpnet"]?.key === "arctic" ? "50/50" : "55% skill / 45% semantic"}. Sorted highest to lowest — top candidates shortlisted.`, color: C.green },
                         ].map(({ step, label, desc, color }) => (
-                            <div key={step} style={{ display: "flex", gap: 12, padding: "10px 14px", borderRadius: 10, background: `${color}06`, border: `1px solid ${color}18` }}>
+                            <div key={step} style={{ display: "flex", gap: 12, padding: "10px 14px", borderRadius: 10, background: `${color}12`, border: `1px solid ${color}24` }}>
                                 <div style={{ width: 24, height: 24, borderRadius: 7, background: `${color}16`, border: `1px solid ${color}28`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 900, color, flexShrink: 0, marginTop: 1 }}>{step}</div>
                                 <div>
                                     <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 2 }}>{label}</div>
@@ -1538,7 +1538,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                 <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 10 }}>Embedding models</div>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap: 10 }}>
                     {Object.values(MODELS).map(m => (
-                        <div key={m.key} style={{ padding: "12px 14px", borderRadius: 12, background: `${m.color}07`, border: `1px solid ${m.color}${activeModel === m.key ? "40" : "18"}`, position: "relative", transition: "border-color .15s" }}
+                        <div key={m.key} style={{ padding: "12px 14px", borderRadius: 12, background: `${m.color}12`, border: `1px solid ${m.color}${activeModel === m.key ? "40" : "22"}`, position: "relative", transition: "border-color .15s" }}
                             onMouseEnter={e => e.currentTarget.style.borderColor = `${m.color}38`}
                             onMouseLeave={e => e.currentTarget.style.borderColor = `${m.color}${activeModel === m.key ? "40" : "18"}`}>
                             {activeModel === m.key && (
