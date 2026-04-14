@@ -25,21 +25,25 @@ _metrics_write_lock = threading.Lock()  # Protects concurrent JSONL writes from 
 
 
 def _rotate_metrics_log(max_entries: int = MAX_METRICS_ENTRIES) -> None:
-    """Trim the metrics log to the most recent max_entries lines using an atomic temp-file swap."""
+    """Trim the metrics log to the most recent max_entries records using an atomic temp-file swap.
+
+    Records are separated by blank lines (pretty-print blocks).
+    """
     try:
         if not METRICS_LOG_FILE.exists():
             return
 
-        if METRICS_LOG_FILE.stat().st_size < 100_000:  # Skip rotation for small files — I/O overhead not worth it
+        if METRICS_LOG_FILE.stat().st_size < 100_000:  # Skip rotation for small files
             return
 
-        lines = METRICS_LOG_FILE.read_text(encoding="utf-8").strip().splitlines()
-        if len(lines) <= max_entries:
+        raw = METRICS_LOG_FILE.read_text(encoding="utf-8")
+        records = [r.strip() for r in raw.split("\n\n") if r.strip()]
+        if len(records) <= max_entries:
             return
 
-        keep = lines[-max_entries:]
+        keep = records[-max_entries:]
 
-        # Write to a temp file then atomically replace the original — prevents partial reads
+        # Atomically replace the file to prevent partial reads
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=METRICS_LOG_FILE.parent,
             suffix=".tmp",
@@ -47,14 +51,14 @@ def _rotate_metrics_log(max_entries: int = MAX_METRICS_ENTRIES) -> None:
         )
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-                fh.write("\n".join(keep) + "\n")
+                fh.write("\n\n".join(keep) + "\n\n")
             os.replace(tmp_path, METRICS_LOG_FILE)
             logger.info(
                 "[MetricsStore] Rotated %s: %d → %d entries.",
-                METRICS_LOG_FILE.name, len(lines), max_entries,
+                METRICS_LOG_FILE.name, len(records), max_entries,
             )
         except Exception:
-            try:  # Clean up the orphaned temp file on failure
+            try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
@@ -134,10 +138,10 @@ def record_run(
     }
 
     try:
-        line = json.dumps(entry) + "\n"
+        block = json.dumps(entry, indent=2, ensure_ascii=False) + "\n\n"
         with _metrics_write_lock:
             with open(METRICS_LOG_FILE, "a", encoding="utf-8") as fh:
-                fh.write(line)
+                fh.write(block)
             _rotate_metrics_log()
         logger.info(
             "[MetricsStore] Run recorded: %s (%d resumes, model=%s).",
@@ -148,20 +152,20 @@ def record_run(
 
 
 def load_all_runs() -> list[dict]:
-    """Load every entry from metrics_log.jsonl (oldest first); corrupted lines are silently skipped."""
+    """Load every entry from metrics_log.jsonl (oldest first); corrupted blocks are silently skipped."""
     if not METRICS_LOG_FILE.exists():
         return []
 
+    raw = METRICS_LOG_FILE.read_text(encoding="utf-8")
     entries = []
-    with open(METRICS_LOG_FILE, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass  # skip malformed lines
+    for block in raw.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        try:
+            entries.append(json.loads(block))
+        except json.JSONDecodeError:
+            pass  # skip malformed blocks
 
     return entries
 

@@ -4,7 +4,7 @@ write_audit()  — called after every screening run to log a structured summary.
 log_failure()  — called on pipeline errors to capture traceback context.
 normalize_skill() — shared skill normalisation used by app.py.
 
-Both JSONL files are rotated (trimmed to MAX_JSONL_ENTRIES most-recent lines)
+Both files are rotated (trimmed to MAX_JSONL_ENTRIES most-recent records)
 only when they actually exceed that size, keeping I/O overhead near zero.
 """
 
@@ -31,24 +31,27 @@ def normalize_skill(s: str) -> str:
 
 
 def _rotate_jsonl(filepath: Path, max_entries: int = MAX_JSONL_ENTRIES) -> None:
-    """Trim filepath to the most-recent max_entries lines.
+    """Trim filepath to the most-recent max_entries records.
 
-    Only performs I/O when the file actually needs trimming — skips files
-    with fewer than max_entries lines.  Must be called while holding
-    _audit_lock so concurrent writers cannot interleave with the trim.
+    Records are separated by a blank line (the pretty-print separator).
+    Must be called while holding _audit_lock so concurrent writers cannot
+    interleave with the trim.
     """
     try:
         if not filepath.exists():
             return
 
-        lines = filepath.read_text(encoding="utf-8").strip().split("\n")
-        if len(lines) <= max_entries:
+        raw = filepath.read_text(encoding="utf-8")
+        # Split on double-newline separators; discard empty strings
+        records = [r.strip() for r in raw.split("\n\n") if r.strip()]
+        if len(records) <= max_entries:
             return     # file is within limit — nothing to do
 
-        filepath.write_text("\n".join(lines[-max_entries:]) + "\n", encoding="utf-8")
+        kept = records[-max_entries:]
+        filepath.write_text("\n\n".join(kept) + "\n\n", encoding="utf-8")
         logger.info(
             "[Audit] Rotated %s: %d → %d entries.",
-            filepath.name, len(lines), max_entries,
+            filepath.name, len(records), max_entries,
         )
     except OSError as e:
         logger.warning("[Audit] Could not rotate %s: %s", filepath.name, e)
@@ -61,10 +64,10 @@ def write_audit(entry: dict) -> None:
     always see a consistent JSONL file (no partial trims interleaved with writes).
     """
     try:
-        line = json.dumps(entry) + "\n"
+        block = json.dumps(entry, indent=2, ensure_ascii=False) + "\n\n"
         with _audit_lock:
             with open(AUDIT_FILE, "a", encoding="utf-8") as f:
-                f.write(line)
+                f.write(block)
             _rotate_jsonl(AUDIT_FILE)
     except OSError as e:
         logger.warning("[Audit] Could not write audit log: %s", e)
@@ -85,7 +88,7 @@ def log_failure(context: dict, error: Exception) -> None:
     try:
         with _audit_lock:
             with open(FAILURES_FILE, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
+                f.write(json.dumps(entry, indent=2, ensure_ascii=False) + "\n\n")
             _rotate_jsonl(FAILURES_FILE)
     except OSError:
         pass   # must not crash the crash handler

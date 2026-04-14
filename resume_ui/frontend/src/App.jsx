@@ -2398,7 +2398,7 @@ const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
                             const stages = [
                                 { label: "PDFs Uploaded", value: results.length, color: C.blue, desc: "Raw resumes received" },
                                 { label: "Successfully Parsed", value: results.length, color: "#818cf8", desc: "Text extracted via pdfplumber / PyMuPDF" },
-                                { label: "Profiles Extracted", value: results.length, color: C.teal, desc: "Name · email · skills · experience via NER" },
+                                { label: "Profiles Extracted", value: results.length, color: C.teal, desc: "Name · email · skills · experience via regex + keyword rules" },
                                 { label: "Scored & Ranked", value: results.length, color: C.amber, desc: `Avg final: ${avgFinal}% · skill: ${avgSkill}% · semantic: ${avgSem}%` },
                                 { label: "Shortlisted", value: eligible.length, color: C.green, desc: `Pass rate: ${passRate}% of total pool` },
                             ];
