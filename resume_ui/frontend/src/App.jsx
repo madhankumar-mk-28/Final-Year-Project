@@ -25,37 +25,35 @@ const DARK = {
     chartSkill: "#818cf8", chartSemantic: "#34d399", chartFinal: "#fbbf24",
 };
 const LIGHT = {
-    // Page & surface ── white-based palette; cards pop against the warm grey page
-    bg:       "#f0f2f5",               // warm light grey page backdrop
-    surface:  "#ffffff",               // pure white cards — maximum contrast vs bg
-    border:   "rgba(0,0,0,0.14)",      // subtle 1-px dividers, visible on white
+    // Page & surfaces
+    bg:       "#f0f2f5",
+    surface:  "#ffffff",
+    border:   "rgba(0,0,0,0.14)",
 
-    // Text ── charcoal hierarchy so every level is legible
-    text:     "#111827",               // primary text  — near-black, high contrast
-    sub:      "#374151",               // secondary text — dark grey, still readable
-    muted:    "#6b7280",               // tertiary / captions — passes WCAG AA on white
-    cardText: "#1f2937",               // body text inside cards
+    // Text hierarchy
+    text:     "#111827",
+    sub:      "#374151",
+    muted:    "#6b7280",
+    cardText: "#1f2937",
 
-    // Accent colours ── vivid but not garish; all readable on white backgrounds
-    blue:     "#4f46e5",               // indigo — primary accent (buttons, links)
-    green:    "#16a34a",               // emerald — shortlisted / success states
-    amber:    "#d97706",               // amber  — warnings / avg-score
-    pink:     "#db2777",               // rose   — "New Screening" quick action
-    teal:     "#0d9488",               // teal   — semantic score / pass rate
+    // Accent colours
+    blue:     "#4f46e5",
+    green:    "#16a34a",
+    amber:    "#d97706",
+    pink:     "#db2777",
+    teal:     "#0d9488",
 
-    // Chrome ── sidebar, topbar, and drawer share a slightly cooler white tone
-    sidebarBg:  "#f8fafc",             // very light blue-white sidebar
-    topbarBg:   "rgba(255,255,255,0.92)", // frosted-glass topbar
-    drawerBg:   "#ffffff",             // candidate drawer — pure white
+    // Chrome
+    sidebarBg:  "#f8fafc",
+    topbarBg:   "rgba(255,255,255,0.92)",
+    drawerBg:   "#ffffff",
 
-    // Inputs & interactive elements
-    inputBg:    "rgba(0,0,0,0.08)",    // subtle input field fill on white cards
-    tableFocus: "rgba(79,70,229,0.06)",// row hover tint matching blue accent
-
-    // Scrollbar thumb
+    // Inputs
+    inputBg:    "rgba(0,0,0,0.08)",
+    tableFocus: "rgba(79,70,229,0.06)",
     scrollThumb: "rgba(0,0,0,0.18)",
 
-    // Chart colours ── darker than dark-mode so they read on white chart backgrounds
+    // Charts — darker shades so they read on white backgrounds
     chartTooltip: "#ffffff",
     chartSkill:   "#4f46e5",
     chartSemantic:"#0d9488",
@@ -142,8 +140,8 @@ const CircularRing = ({ value, size = 52, sw = 4.5, color }) => {
                     strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
                     style={{ transition: "stroke-dashoffset 1s cubic-bezier(.4,0,.2,1)" }} />
             </svg>
-            <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.22, fontWeight: 700, color: C.text }}>
-                {safeVal}
+            <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.20, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+                {safeVal}%
             </span>
         </div>
     );
@@ -160,9 +158,9 @@ const GaugeArc = ({ value }) => {
             <path d={`M${cx - r} ${cy} A${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke={col} strokeWidth={sw} strokeLinecap="round"
                 strokeDasharray={circ} strokeDashoffset={off}
                 style={{ transition: "stroke-dashoffset 1.2s ease", filter: `drop-shadow(0 0 7px ${col}88)` }} />
-            {/* Score centred vertically inside the arc */}
-            <text x={cx} y={cy - 16} textAnchor="middle" fill={C.text} fontSize="26" fontWeight="900">{value}</text>
-            <text x={cx} y={cy - 2} textAnchor="middle" fill={C.sub} fontSize="10">/ 100</text>
+            {/* Score text — vertically centred in the open space below the arc mid-height */}
+            <text x={cx} y={cy - 20} textAnchor="middle" fill={C.text} fontSize="28" fontWeight="900" fontVariantNumeric="tabular-nums">{value}%</text>
+            <text x={cx} y={cy - 6} textAnchor="middle" fill={C.sub} fontSize="9">Final Score</text>
         </svg>
     );
 };
@@ -491,12 +489,12 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
                                                 </div>
                                                 <div style={{ fontWeight: 700, color: "#f1f1f3", marginBottom: 6, lineHeight: 1.3 }}>{fullName}</div>
                                                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "5px 0", borderTop: `1px solid rgba(255,255,255,0.10)` }}>
-                                                    <span style={{ color: "#9ca3af", fontSize: 10 }}>Skill weight</span>
-                                                    <span style={{ fontWeight: 700, color: "#f1f1f3", fontVariantNumeric: "tabular-nums" }}>{coveragePct}% of req.</span>
+                                                    <span style={{ color: "#9ca3af", fontSize: 10 }}>This skill</span>
+                                                    <span style={{ fontWeight: 700, color: "#f1f1f3", fontVariantNumeric: "tabular-nums" }}>1 of {totalRequired} required</span>
                                                 </div>
                                                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                                                    <span style={{ color: "#9ca3af", fontSize: 10 }}>{isMatched ? "Matched" : "Missing"}</span>
-                                                    <span style={{ fontWeight: 700, color: isMatched ? C.teal : "#ef4444", fontVariantNumeric: "tabular-nums" }}>{matchedCount}/{totalRequired} skills</span>
+                                                    <span style={{ color: "#9ca3af", fontSize: 10 }}>Overall skills</span>
+                                                    <span style={{ fontWeight: 700, color: isMatched ? C.teal : "#ef4444", fontVariantNumeric: "tabular-nums" }}>{matchedCount}/{totalRequired} matched</span>
                                                 </div>
                                             </div>
                                         );
@@ -619,7 +617,12 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
             if (cappedCount > 0) showToast(`${cappedCount} file(s) not added — session is full (${MAX_FILES} max)`, "error");
             if (fresh.length > 0) {
                 showToast(`${fresh.length} PDF${fresh.length !== 1 ? "s" : ""} added successfully`, "success");
-                setTimeout(() => jdRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
+                // Only auto-scroll to JD for small batches; large batches should stay
+                // on the file list so the user can confirm what was uploaded.
+                const totalAfter = prev.length + fresh.length;
+                if (totalAfter <= 5) {
+                    setTimeout(() => jdRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
+                }
             }
             return [...prev, ...fresh];
         });
@@ -771,32 +774,117 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
                 </div>
             </div>
 
-            {/* Uploaded file list */}
+            {/* Uploaded file list — sticky header with scrollable body */}
             {fileItems.length > 0 && (
                 <div style={card({ padding: 0, overflow: "hidden" })}>
-                    <div style={{ padding: "10px 15px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".06em" }}>
-                            {fileItems.length} file{fileItems.length !== 1 ? "s" : ""} ready to upload
-                        </span>
-                        <button onClick={() => setFileItems([])} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: C.sub, fontFamily: "inherit" }}>Clear All</button>
-                    </div>
-                    {fileItems.map(f => (
-                        <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 15px", borderBottom: `1px solid ${C.border}22`, transition: "background .12s" }}
-                            onMouseEnter={e => e.currentTarget.style.background = C.tableFocus}
-                            onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                            <div style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.18)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                                <FileText size={12} color="#ef4444" />
+                    {/* Header always visible — not clipped by the scrollable list below */}
+                    <div style={{
+                        padding: "12px 16px",
+                        borderBottom: `1px solid ${C.border}`,
+                        display: "flex", justifyContent: "space-between", alignItems: "center",
+                        background: C.surface,
+                        position: "sticky", top: 0, zIndex: 2,
+                    }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div style={{
+                                width: 24, height: 24, borderRadius: 6,
+                                background: `${C.green}18`, border: `1px solid ${C.green}30`,
+                                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                            }}>
+                                <CheckCircle size={12} color={C.green} />
                             </div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 13, color: C.cardText, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</div>
-                                <div style={{ fontSize: 10, color: C.sub }}>{f.size}</div>
-                            </div>
-                            <CheckCircle size={12} color={C.green} />
-                            <button onClick={() => setFileItems(p => p.filter(x => x.id !== f.id))} style={{ background: "none", border: "none", cursor: "pointer", color: C.sub }}>
-                                <X size={11} />
-                            </button>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
+                                {fileItems.length} {fileItems.length === 1 ? "File" : "Files"} Uploaded
+                            </span>
+                            <span style={{
+                                fontSize: 10, fontWeight: 600,
+                                padding: "2px 8px", borderRadius: 20,
+                                background: `${C.green}14`, color: C.green,
+                                border: `1px solid ${C.green}25`,
+                            }}>Ready</span>
                         </div>
-                    ))}
+                        <button
+                            onClick={() => setFileItems([])}
+                            style={{
+                                background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.22)",
+                                borderRadius: 7, cursor: "pointer", fontSize: 11, fontWeight: 600,
+                                color: "#ef4444", fontFamily: "inherit", padding: "3px 10px",
+                                display: "flex", alignItems: "center", gap: 4,
+                            }}
+                        >
+                            <X size={10} /> Clear All
+                        </button>
+                    </div>
+
+                    {/* Scrollable file list — capped at 320 px so header stays visible */}
+                    <div style={{
+                        maxHeight: 320,
+                        overflowY: "auto",
+                        overflowX: "hidden",
+                        scrollbarWidth: "thin",
+                        scrollbarColor: `${C.scrollThumb} transparent`,
+                    }}>
+                        {fileItems.map((f, idx) => (
+                            <div key={f.id}
+                                style={{
+                                    display: "flex", alignItems: "center", gap: 10,
+                                    padding: "8px 16px",
+                                    borderBottom: `1px solid ${C.border}33`,
+                                    transition: "background .12s",
+                                }}
+                                onMouseEnter={e => e.currentTarget.style.background = C.tableFocus}
+                                onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                            >
+                                <span style={{
+                                    fontSize: 10, color: C.muted, fontVariantNumeric: "tabular-nums",
+                                    minWidth: 22, textAlign: "right", flexShrink: 0,
+                                }}>{idx + 1}</span>
+                                <div style={{
+                                    width: 28, height: 28, borderRadius: 7,
+                                    background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.18)",
+                                    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                                }}>
+                                    <FileText size={12} color="#ef4444" />
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{
+                                        fontSize: 12, color: C.cardText, fontWeight: 500,
+                                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                    }}>{f.name}</div>
+                                    <div style={{ fontSize: 10, color: C.muted }}>{f.size}</div>
+                                </div>
+                                <CheckCircle size={11} color={C.green} style={{ flexShrink: 0 }} />
+                                <button
+                                    onClick={() => setFileItems(p => p.filter(x => x.id !== f.id))}
+                                    title="Remove file"
+                                    style={{
+                                        background: "none", border: "none", cursor: "pointer",
+                                        color: C.muted, padding: 2, borderRadius: 4, flexShrink: 0,
+                                        display: "flex", alignItems: "center",
+                                        transition: "color .12s",
+                                    }}
+                                    onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
+                                    onMouseLeave={e => e.currentTarget.style.color = C.muted}
+                                >
+                                    <X size={11} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Footer summary when list overflows */}
+                    {fileItems.length > 8 && (
+                        <div style={{
+                            padding: "8px 16px",
+                            borderTop: `1px solid ${C.border}`,
+                            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                            fontSize: 11, color: C.muted,
+                            background: C.surface,
+                        }}>
+                            <Info size={11} />
+                            Scroll to view all {fileItems.length} files · ready to screen
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -1127,7 +1215,7 @@ const ProcessingView = ({ config, onDone, onSessionReady }) => {
                     </div>
                 </div>
 
-                {/* Ring + bar */}
+                {/* Progress indicator — circular ring above a linear bar */}
                 <div style={card({ display: "flex", flexDirection: "column", alignItems: "center", gap: 18, marginBottom: 12 })}>
                     <div style={{ position: "relative", width: 112, height: 112 }}>
                         <svg width={112} height={112} style={{ transform: "rotate(-90deg)" }}>
@@ -1607,7 +1695,7 @@ function exportDecisionGroup(list, groupLabel) {
     if (!list?.length) return;
     const headers = ["Rank", "Name", "Email", "Phone", "Final Score", "Skill Score", "Semantic Score"];
     const rows = list.map(c => [
-        c.rank || "—",
+        csvField(c.rank || "—"),
         csvField(c.name),
         csvField(c.email),
         csvField(c.phone),
@@ -1627,7 +1715,7 @@ function exportToCSV(results) {
     if (!shortlisted.length) return;
     const headers = ["Rank", "Name", "Email", "Phone"];
     const rows = shortlisted.map(c => [
-        c.rank,
+        csvField(c.rank),
         csvField(c.name),
         csvField(c.email),
         csvField(c.phone),
@@ -1756,7 +1844,7 @@ const CandidatesView = ({ results, onNav, isMobile }) => {
  * on the backend so they auto-fill the Upload form on every future session.
  * No props — reads and writes via GET/POST /api/config.
  */
-const JobConfigView = () => {
+const JobConfigView = ({ isMobile }) => {
     const [saved, setSaved] = useState(false);
     const [cfg, setCfg] = useState({ jd: "", skills: [], minExp: 0, skillW: 55, semanticW: 45 });
     const [newSkill, setNewSkill] = useState("");
@@ -1832,7 +1920,7 @@ const JobConfigView = () => {
             </div>
 
             {/* Two-column layout same as Upload */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, alignItems: "stretch" }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 18, alignItems: "stretch" }}>
                 {/* Left: JD */}
                 <div style={{ ...card(), display: "flex", flexDirection: "column" }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 14, display: "flex", alignItems: "center", gap: 7 }}>
@@ -1902,8 +1990,6 @@ const JobConfigView = () => {
     );
 };
 
-
-
 const ModelEvalMetrics = ({ results, activeModel, onNavDecisions }) => {
     const ev = useMemo(() => {
         if (!results || results.length === 0) return null;
@@ -1924,7 +2010,7 @@ const ModelEvalMetrics = ({ results, activeModel, onNavDecisions }) => {
             const final = c.finalScore || 0;
             sims.push(sem); finals.push(final);
 
-            // Use backend band — avoids hardcoded threshold mismatch with dynamic backend
+            // Use backend band — matches the fixed band names: 'Strong Fit', 'Borderline', 'Weak Fit'
             const band = c.band || (c.eligible ? "Borderline" : "Weak Fit");
             if (band === "Strong Fit") bands["Strong Fit"]++;
             else if (band === "Borderline") bands["Borderline"]++;
@@ -2011,10 +2097,10 @@ const ModelEvalMetrics = ({ results, activeModel, onNavDecisions }) => {
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr 1fr" }}>
                         {[
-                            { ab: "TP", label: "True Positives", color: C.green, val: ev.tp, verdict: "Fit → Fit ✓" },
-                            { ab: "TN", label: "True Negatives", color: C.teal, val: ev.tn, verdict: "Not Fit → Not Fit ✓" },
-                            { ab: "FP", label: "False Positives", color: C.amber, val: ev.fp, verdict: "Fit → Not Fit ✗" },
-                            { ab: "FN", label: "False Negatives", color: "#ef4444", val: ev.fn, verdict: "Not Fit → Fit ✗" },
+                            { ab: "TP", label: "True Positives", color: C.green, val: ev.tp, verdict: "Predicted Fit → Actually Fit ✓" },
+                            { ab: "TN", label: "True Negatives", color: C.teal, val: ev.tn, verdict: "Predicted Not Fit → Actually Not Fit ✓" },
+                            { ab: "FP", label: "False Positives", color: C.amber, val: ev.fp, verdict: "Predicted Fit → Actually Not Fit ✗" },
+                            { ab: "FN", label: "False Negatives", color: "#ef4444", val: ev.fn, verdict: "Predicted Not Fit → Actually Fit ✗" },
                         ].map(({ ab, label, color, val, verdict }, i) => (
                             <div key={ab} style={{
                                 padding: "14px 14px",
@@ -2282,8 +2368,8 @@ const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
                                         { range: "0–20", label: "Very Low", desc: "poor fit", color: "#c11c1c" },
                                     ].map(({ range, label, desc, color }, idx, arr) => {
                                         const count = buckets[range] || 0;
-                                        const maxBandCount = Math.max(1, ...Object.values(buckets));
-                                        const pct = Math.round(count / maxBandCount * 100);
+                                        // Width proportional to total candidates — not relative to max-bucket
+                                        const pct = results.length > 0 ? Math.round(count / results.length * 100) : 0;
                                         return (
                                             <div key={range} style={{ display: "grid", gridTemplateColumns: "80px 1fr 28px", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: idx < arr.length - 1 ? `1px solid ${C.border}` : "none" }}>
                                                 {/* Label */}
@@ -2678,12 +2764,12 @@ const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
                                                                     </div>
                                                                     <div style={{ fontWeight: 700, color: "#f1f1f3", marginBottom: 6, lineHeight: 1.3 }}>{fullName}</div>
                                                                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "5px 0", borderTop: `1px solid rgba(255,255,255,0.10)` }}>
-                                                                        <span style={{ color: "#9ca3af", fontSize: 10 }}>Skill weight</span>
-                                                                        <span style={{ fontWeight: 700, color: "#f1f1f3", fontVariantNumeric: "tabular-nums" }}>{coveragePct}% of req.</span>
+                                                                        <span style={{ color: "#9ca3af", fontSize: 10 }}>This skill</span>
+                                                                        <span style={{ fontWeight: 700, color: "#f1f1f3", fontVariantNumeric: "tabular-nums" }}>1 of {totalReq} required</span>
                                                                     </div>
                                                                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                                                                        <span style={{ color: "#9ca3af", fontSize: 10 }}>{isMatched ? "Matched" : "Missing"}</span>
-                                                                        <span style={{ fontWeight: 700, color: isMatched ? col : "#ef4444", fontVariantNumeric: "tabular-nums" }}>{matchedCnt}/{totalReq} skills</span>
+                                                                        <span style={{ color: "#9ca3af", fontSize: 10 }}>Overall skills</span>
+                                                                        <span style={{ fontWeight: 700, color: isMatched ? col : "#ef4444", fontVariantNumeric: "tabular-nums" }}>{matchedCnt}/{totalReq} matched</span>
                                                                     </div>
                                                                 </div>
                                                             );
@@ -3193,7 +3279,7 @@ export default function App() {
             case "processing":
                 return <ProcessingView config={screeningConfig} onDone={handleProcessingDone} onSessionReady={handleSessionReady} />;
             case "config":
-                return <JobConfigView />;
+                return <JobConfigView isMobile={isMobile} />;
             case "candidates":
                 return <CandidatesView results={results} onNav={go} isMobile={isMobile} />;
             case "analytics":

@@ -53,12 +53,14 @@ class ScoringConfig:
 SKILL_ALIASES = {
     "machine learning":     ["ml", "machine learning", "sklearn", "scikit-learn", "xgboost", "lightgbm"],
     "deep learning":        ["deep learning", "neural network", "neural networks", "dl"],
-    "nlp":                  ["nlp", "natural language processing", "text mining", "nltk", "spacy", "gensim", "bert", "transformers", "huggingface"],
+    "nlp":                  ["nlp", "natural language processing", "text mining", "nltk", "spacy",
+                             "gensim", "bert", "transformers", "huggingface"],
     "scikit-learn":         ["scikit-learn", "sklearn"],
     "pytorch":              ["pytorch", "torch"],
     "tensorflow":           ["tensorflow", "tf", "keras"],
     "python":               ["python", "python3", "py"],
-    "sql":                  ["sql", "mysql", "postgresql", "postgres", "sqlite", "oracle", "mariadb", "tsql", "pl/sql"],
+    "sql":                  ["sql", "mysql", "postgresql", "postgres", "sqlite", "oracle",
+                             "mariadb", "tsql", "pl/sql"],
     "pandas":               ["pandas"],
     "numpy":                ["numpy", "scipy"],
     "flask":                ["flask", "fastapi"],
@@ -67,23 +69,58 @@ SKILL_ALIASES = {
     "aws":                  ["aws", "azure", "gcp", "google cloud", "cloud computing"],
     "react":                ["react", "reactjs", "next.js", "nextjs"],
     "javascript":           ["javascript", "typescript", "js", "ts", "nodejs", "node", "node.js", "express"],
-    "data analytics":       ["data analytics", "analytics", "business intelligence", "bi", "tableau", "power bi"],
+    "data analytics":       ["data analytics", "analytics", "data analysis", "business intelligence",
+                             "bi", "tableau", "power bi", "data visualization", "statistical analysis"],
     "itsm":                 ["itsm", "it service management", "itil", "service desk", "service management"],
-    "crud":                 ["crud", "database operations", "data manipulation"],
-    "stored procedures":    ["stored procedures", "stored procedure", "pl/sql", "t-sql", "tsql"],
-    "problem solving":      ["problem solving", "troubleshooting", "debugging", "root cause analysis"],
-    "teamwork":             ["teamwork", "team player"],
-    "collaboration":        ["collaboration", "team player", "cross-functional"],
-    "communication":        ["communication", "verbal communication", "written communication"],
-    "verbal communication": ["verbal communication"],
-    "written communication":["written communication", "documentation"],
-    "analytical skills":    ["analytical skills", "analytical thinking", "data analysis", "analysis"],
-    "critical thinking":    ["critical thinking", "analytical thinking"],
-    "time management":      ["time management", "prioritization", "deadline management"],
-    "adaptability":         ["adaptability", "flexibility", "versatility"],
+    "crud":                 ["crud", "database operations", "data manipulation", "create read update delete"],
+    "stored procedures":    ["stored procedures", "stored procedure", "pl/sql", "t-sql", "tsql",
+                             "database programming", "sql server"],
+
+    # ── Soft skills — broad synonym coverage ─────────────────────────────────
+    # The aliases below intentionally overlap so that a candidate who lists any
+    # ONE of: communication / teamwork / collaboration / problem solving  gets
+    # credit for the related required-skills group.  The scoring engine de-dupes
+    # so no double-counting occurs.
+
+    "problem solving":      ["problem solving", "problem-solving", "troubleshooting", "debugging",
+                             "root cause analysis", "analytical thinking", "critical thinking",
+                             "issue resolution", "solutioning"],
+    "analytical skills":    ["analytical skills", "analytical thinking", "data analysis", "analysis",
+                             "problem solving", "critical thinking", "statistical analysis",
+                             "data analytics", "research"],
+    "critical thinking":    ["critical thinking", "analytical thinking", "problem solving",
+                             "analytical skills", "logical thinking", "reasoning",
+                             "decision making", "analysis"],
+    "teamwork":             ["teamwork", "team player", "team work", "collaboration",
+                             "cross-functional", "cooperative", "group work"],
+    "collaboration":        ["collaboration", "team player", "teamwork", "team work",
+                             "cooperative", "cross-functional", "group work"],
+    # communication covers both verbal and written — a candidate who lists
+    # "communication" satisfies verbal communication AND written communication
+    # requirements because it is the parent/superset concept.
+    "communication":        ["communication", "verbal communication", "written communication",
+                             "interpersonal skills", "presentation", "public speaking"],
+    "verbal communication": ["verbal communication", "communication", "interpersonal skills",
+                             "public speaking", "presentation", "oral communication",
+                             "speaking"],
+    "written communication":["written communication", "communication", "documentation",
+                             "writing", "report writing", "technical writing", "content writing"],
+    "time management":      ["time management", "time-management", "prioritization",
+                             "deadline management", "scheduling", "multitasking"],
+    "adaptability":         ["adaptability", "flexibility", "versatility", "quick learner",
+                             "fast learner", "agile mindset"],
+    "leadership":           ["leadership", "team lead", "mentoring", "managing",
+                             "project management", "people management"],
+    "attention to detail":  ["attention to detail", "detail oriented", "detail-oriented",
+                             "precision", "accuracy"],
+    "presentation":         ["presentation", "public speaking", "verbal communication",
+                             "communication"],
+    # ── Database skills ───────────────────────────────────────────────────────
     "database management":  ["database management", "database design", "dbms", "rdbms", "nosql",
                              "sql", "mysql", "postgresql", "mongodb", "oracle", "sqlite"],
-    "database design":      ["database design", "schema design", "normalization", "data modeling"],
+    "database design":      ["database design", "schema design", "normalization", "data modeling",
+                             "database management"],
+    # ── Tech skills ───────────────────────────────────────────────────────────
     "bootstrap":            ["bootstrap", "css framework"],
     "c":                    ["c programming", "c language"],
     "java":                 ["java", "j2ee", "jvm", "maven", "gradle"],
@@ -194,40 +231,57 @@ def _is_skill_match(req_lower: str, candidate_lower: set) -> bool:
 
     Match hierarchy (first hit wins):
       1. Exact normalised match.
-      2. Alias exact match.
-      3. Word-boundary substring match (both directions).
-      4. Token overlap ≥ 2/3 of required-skill tokens.
+      2. Required-skill alias exact match against candidate skills.
+      3. Reverse-alias: check if ANY alias of EACH candidate skill covers the required skill.
+         This handles the case where candidate lists "communication" and required is
+         "verbal communication" — "communication" is an alias of "verbal communication".
+      4. Word-boundary substring match (both directions).
+      5. Token overlap ≥ 2/3 of required-skill tokens.
     Patterns are retrieved from _regex_cache and compiled at most once per unique term.
     """
     if req_lower in candidate_lower:
         return True
 
-    aliases     = SKILL_ALIASES.get(req_lower, [req_lower])
-    alias_norms = [_normalise_skill_text(a) for a in aliases]
+    req_aliases     = SKILL_ALIASES.get(req_lower, [req_lower])
+    req_alias_norms = [_normalise_skill_text(a) for a in req_aliases]
 
-    # Alias exact match
-    if candidate_lower.intersection(alias_norms):
+    # ── Check 2: required-skill aliases against candidate skill set ────────────
+    if candidate_lower.intersection(req_alias_norms):
         return True
+
+    # ── Check 3: reverse-alias lookup ─────────────────────────────────────────
+    # For each candidate skill, get ITS alias list and check whether req_lower
+    # (or any of req's aliases) is covered by that alias list.
+    for cand in candidate_lower:
+        cand_aliases     = SKILL_ALIASES.get(cand, [cand])
+        cand_alias_norms = {_normalise_skill_text(a) for a in cand_aliases}
+        # Does any required-skill alias appear in the candidate's alias set?
+        if cand_alias_norms.intersection(req_alias_norms):
+            return True
+        # Does the required skill itself appear in the candidate's alias list?
+        if req_lower in cand_alias_norms:
+            return True
 
     req_tokens = _tokenise_skill(req_lower)
 
     for cand in candidate_lower:
-        # Word-boundary substring match (both directions)
+        # ── Check 4: Word-boundary substring match (both directions) ──────────
         if len(req_lower) >= 4:
             if _skill_re(req_lower).search(cand):
                 return True
             if len(cand) >= 4 and _skill_re(cand).search(req_lower):
                 return True
 
-        # Token overlap: at least 2/3 of the required skill's tokens must appear in the candidate
+        # ── Check 5: Token overlap ≥ 2/3 of required-skill tokens ─────────────
         cand_tokens = _tokenise_skill(cand)
         if req_tokens and len(req_tokens) > 1:
             if len(req_tokens & cand_tokens) / len(req_tokens) >= 0.67:
                 return True
 
-        # Same checks for each alias
-        for alias, alias_norm in zip(aliases, alias_norms):
-            _ = alias  # alias string kept for readability; alias_norm is used for matching
+        # Same substring + token checks for each required-skill alias
+        for alias_norm in req_alias_norms:
+            if alias_norm == req_lower:
+                continue  # already checked above
             if len(alias_norm) >= 4:
                 if _skill_re(alias_norm).search(cand):
                     return True
@@ -453,12 +507,16 @@ def score_candidates(candidates: list, required_skills: list,
         r["near_threshold"]    = r["confidence"] < 0.05
 
         # Band and eligibility both derived from dyn_threshold — guaranteed to be consistent
+        # Band strings MUST match the frontend's checks in AnalyticsView and Decisions tab:
+        #   c.band === "Weak Fit"   → Archive group (ineligible)
+        #   c.band === "Borderline" → Secondary Review group (eligible, near threshold)
+        #   c.band === "Strong Fit" → Interview Now group (eligible, well above threshold)
         if not eligible:
-            r["band"] = "Not Eligible"
+            r["band"] = "Weak Fit"
         elif r["final_score"] >= dyn_threshold + 0.10:
             r["band"] = "Strong Fit"
         else:
-            r["band"] = "Good Fit"
+            r["band"] = "Borderline"
 
         logger.debug(
             "[scoring_engine] %s | skill=%.2f sem=%.2f exp=%.2f → final=%.2f | thresh=%.2f | %s",

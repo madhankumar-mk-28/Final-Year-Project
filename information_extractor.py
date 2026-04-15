@@ -95,12 +95,29 @@ _SINGLE_SKILL_RE = re.compile(
     r"\b(" + "|".join(re.escape(s) for s in _SINGLE_WORD_SKILLS) + r")\b"
 )
 
-# Degree pattern — 80-char cap prevents it from consuming entire paragraphs
+# Degree pattern — used to LOCATE degree mentions; we then extract the
+# surrounding line rather than the raw regex group (which starts mid-word
+# when pdfplumber rejoins hyphenated line-breaks from multi-column PDFs).
 DEGREE_PATTERN = re.compile(
     r"(b\.?sc|b\.?tech|b\.?e\.?|bca|bba|bachelor|m\.?sc|m\.?tech|m\.?e\.?|mca|mba|master|ph\.?d|diploma)"
     r"[\w\s,.()-]{0,80}",
     re.IGNORECASE,
 )
+
+# Hyphenated skills normalisation — converts e.g. "problem-solving" → "problem solving"
+# so they are recognised as entries in SKILLS_DB.
+_HYPHEN_SKILL_RE = re.compile(
+    r"\b(problem|decision|critical|multi|self|cross|result|goal|forward|detail|team|time|data|risk|cost)"
+    r"-(\w+)\b",
+    re.IGNORECASE,
+)
+
+# Minimum length for an education entry to be kept (avoids single-word noise)
+_EDU_MIN_LEN = 15
+
+# Leading fragment pattern — strips lowercase-only prefix chars that result from
+# mid-word text joins in multi-column PDF layouts (e.g. "ment Systems" → "Systems").
+_EDU_LEADING_FRAGMENT_RE = re.compile(r"^[a-z]+\s+")
 
 # ---------------------------------------------------------------------------
 # Experience extraction constants — at module level so they compile once
@@ -250,8 +267,12 @@ def extract_skills(text: str) -> list:
 
     Multi-word skills use substring search (longest-first to prevent partial
     matches).  Single-word skills use a single pre-compiled regex pass.
+    Hyphenated variants (e.g. "problem-solving", "time-management") are
+    normalised to their spaced form before matching.
     """
-    text_lower = text.lower()
+    # Normalise hyphenated skill variants → spaced form ("problem-solving" → "problem solving")
+    normalised = _HYPHEN_SKILL_RE.sub(lambda m: m.group(1) + " " + m.group(2), text)
+    text_lower = normalised.lower()
     found = set()
 
     for skill in _MULTI_WORD_SKILLS:
@@ -294,11 +315,70 @@ def extract_experience_years(text: str) -> float:
     return 0.0
 
 
+def _clean_edu_entry(raw: str) -> str:
+    """Clean a raw education string extracted from PDF text.
+
+    Removes leading lowercase word-fragments produced when pdfplumber rejoins
+    a hyphenated line-break from a multi-column layout.  Example:
+      "ment Systems..." → remove leading "ment "
+      "MENTS" → discard entirely (too short / uppercase noise)
+    Also collapses embedded newlines and excess whitespace.
+    """
+    # Collapse any embedded newlines / tabs into a single space
+    raw = re.sub(r"[\n\r\t]+", " ", raw)
+    raw = re.sub(r" {2,}", " ", raw).strip()
+
+    # Strip leading lowercase-only fragments (mid-word artefact from PDF joins)
+    raw = _EDU_LEADING_FRAGMENT_RE.sub("", raw).strip()
+
+    # Remove any remaining non-printable / control characters
+    raw = re.sub(r"[\x00-\x1f\x7f]", " ", raw).strip()
+
+    return raw
+
+
 def extract_education(text: str) -> list:
-    """Extract education qualifications (degrees, diplomas) from resume text."""
-    found = []
+    """Extract education qualifications (degrees, diplomas) from resume text.
+
+    Strategy: use DEGREE_PATTERN to *locate* degree mentions, then extract the
+    **complete line** (up to 120 chars) that surrounds each match.  This avoids
+    the common artefact where the regex group starts mid-word because pdfplumber
+    has rejoined a hyphenated line-break from a multi-column PDF layout.
+
+    Each extracted line is cleaned to remove leading word-fragments, embedded
+    newlines, and short noise strings before being returned.
+    """
+    lines = text.splitlines()
+    found: list[str] = []
+    seen: set[str] = set()
+
     for m in DEGREE_PATTERN.finditer(text):
-        entry = m.group(0).strip()[:80]
-        if entry not in found:
+        match_start = m.start()
+
+        # Walk backwards in the text to find the start of the current line
+        line_start = text.rfind("\n", 0, match_start)
+        line_start = line_start + 1 if line_start >= 0 else 0
+
+        # Walk forwards to find the end of the current line
+        line_end = text.find("\n", match_start)
+        if line_end == -1:
+            line_end = len(text)
+
+        # Cap the extracted segment to 120 chars around the match start
+        raw_line = text[line_start:min(line_end, line_start + 120)]
+
+        entry = _clean_edu_entry(raw_line)
+
+        # Discard fragments that are too short or are pure-uppercase noise like "MENTS"
+        if len(entry) < _EDU_MIN_LEN:
+            continue
+        # Discard entries that are ALL uppercase and very short (section-header artefacts)
+        if entry.isupper() and len(entry) < 30:
+            continue
+
+        key = entry.lower()
+        if key not in seen:
+            seen.add(key)
             found.append(entry)
+
     return found
