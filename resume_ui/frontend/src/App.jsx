@@ -152,16 +152,43 @@ const GaugeArc = ({ value }) => {
     const circ = Math.PI * r;
     const off = circ - (value / 100) * circ;
     const col = value >= 80 ? C.green : value >= 55 ? C.blue : C.amber;
+    // Layout:
+    //   Container is 88px tall (matches SVG height).
+    //   Arc top: y=18  Arc mouth inner edge: y=76  Arc outer bottom: y=88
+    //   Text is absolutely placed with bottom=14, so the block's bottom sits at
+    //   y=74 (2px above inner arc edge).  This puts the text visually INSIDE the
+    //   bowl, right at its lower opening — not floating below the arc.
     return (
-        <svg width={170} height={90} viewBox="0 0 170 90">
-            <path d={`M${cx - r} ${cy} A${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke="rgba(128,128,128,0.1)" strokeWidth={sw} strokeLinecap="round" />
-            <path d={`M${cx - r} ${cy} A${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke={col} strokeWidth={sw} strokeLinecap="round"
-                strokeDasharray={circ} strokeDashoffset={off}
-                style={{ transition: "stroke-dashoffset 1.2s ease", filter: `drop-shadow(0 0 7px ${col}88)` }} />
-            {/* Score text — vertically centred in the open space below the arc mid-height */}
-            <text x={cx} y={cy - 20} textAnchor="middle" fill={C.text} fontSize="28" fontWeight="900" fontVariantNumeric="tabular-nums">{value}%</text>
-            <text x={cx} y={cy - 6} textAnchor="middle" fill={C.sub} fontSize="9">Final Score</text>
-        </svg>
+        <div style={{ position: "relative", width: 170, flexShrink: 0 }}>
+            <svg width={170} height={88} viewBox="0 0 170 88" style={{ display: "block" }}>
+                {/* Track */}
+                <path d={`M${cx - r} ${cy} A${r} ${r} 0 0 1 ${cx + r} ${cy}`}
+                    fill="none" stroke="rgba(128,128,128,0.11)" strokeWidth={sw} strokeLinecap="round" />
+                {/* Filled arc */}
+                <path d={`M${cx - r} ${cy} A${r} ${r} 0 0 1 ${cx + r} ${cy}`}
+                    fill="none" stroke={col} strokeWidth={sw} strokeLinecap="round"
+                    strokeDasharray={circ} strokeDashoffset={off}
+                    style={{ transition: "stroke-dashoffset 1.2s ease", filter: `drop-shadow(0 0 7px ${col}88)` }} />
+            </svg>
+            {/* Text overlay — absolutely placed inside the arc bowl */}
+            <div style={{
+                position: "absolute",
+                bottom: 12,
+                left: 0, right: 0,
+                textAlign: "center",
+                lineHeight: 1,
+                pointerEvents: "none",
+            }}>
+                <div style={{
+                    fontSize: 28, fontWeight: 900, color: col,
+                    fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em",
+                }}>{value}%</div>
+                <div style={{
+                    fontSize: 10, color: C.sub, marginTop: 5,
+                    fontWeight: 600, letterSpacing: "0.04em",
+                }}>Final Score</div>
+            </div>
+        </div>
     );
 };
 
@@ -1254,28 +1281,36 @@ const ProcessingView = ({ config, onDone, onSessionReady }) => {
                             </div>
                         </div>
                         <div style={{ padding: "12px 18px", display: "flex", flexDirection: "column", gap: 8 }}>
-                            {warnings.map((w, i) => (
-                                <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "10px 13px", borderRadius: 10, background: "rgba(239,68,68,.07)", border: "1px solid rgba(239,68,68,.22)", lineHeight: 1.6 }}>
-                                    <AlertCircle size={12} color="#ef4444" style={{ flexShrink: 0, marginTop: 2 }} />
-                                    <span style={{ fontSize: 12, color: C.text }}>
-                                        {(() => {
-                                            const sep = w.lastIndexOf(': ');
-                                            if (sep === -1) return w;
-                                            const prefix = w.slice(0, sep + 2);
-                                            const files = w.slice(sep + 2).split(', ');
-                                            return <>
-                                                {prefix}
+                            {warnings.map((w, i) => {
+                                // Split into a header sentence + a list of filenames
+                                const sep = w.lastIndexOf(': ');
+                                const prefix = sep !== -1 ? w.slice(0, sep + 1) : w;   // e.g. "3 PDF(s) could not be parsed and were skipped"
+                                const files  = sep !== -1 ? w.slice(sep + 2).split(', ').filter(Boolean) : [];
+                                return (
+                                    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                        {/* Prefix / summary line */}
+                                        <div style={{ fontSize: 12, color: C.text, fontWeight: 600, lineHeight: 1.5 }}>
+                                            {prefix}
+                                        </div>
+                                        {/* One pill per skipped filename */}
+                                        {files.length > 0 && (
+                                            <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 2 }}>
                                                 {files.map((f, fi) => (
-                                                    <span key={fi}>
-                                                        <strong style={{ color: C.text, fontWeight: 700 }}>{f}</strong>
-                                                        {fi < files.length - 1 ? ', ' : ''}
-                                                    </span>
+                                                    <div key={fi} style={{
+                                                        display: "flex", alignItems: "center", gap: 8,
+                                                        padding: "6px 10px", borderRadius: 8,
+                                                        background: "rgba(239,68,68,0.06)",
+                                                        border: "1px solid rgba(239,68,68,0.18)",
+                                                    }}>
+                                                        <span style={{ fontSize: 11, lineHeight: 1, flexShrink: 0 }}>📄</span>
+                                                        <span style={{ fontSize: 12, color: C.text, fontWeight: 600, wordBreak: "break-all" }}>{f}</span>
+                                                    </div>
                                                 ))}
-                                            </>;
-                                        })()}
-                                    </span>
-                                </div>
-                            ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
                             <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.6, marginTop: 4 }}>
                                 These resumes are usually password-protected, scanned without a text layer, or corrupted. The screening ran successfully on all other files.
                             </div>
@@ -1499,7 +1534,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                     {/* Top candidate card */}
                     <FieldCard label="Top Candidate" dot={C.amber}>
                         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", paddingTop: 4 }}>
-                            <div style={{ position: "relative", marginBottom: 14 }}>
+                            <div style={{ marginBottom: 2 }}>
                                 <GaugeArc value={topScore} />
                                 <div style={{ marginTop: 2, fontSize: 14, fontWeight: 800, color: C.text }}>{top.name}</div>
                                 <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>🥇 Rank #1</div>
