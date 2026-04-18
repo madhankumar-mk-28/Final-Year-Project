@@ -4,7 +4,7 @@ import {
     FileText, TrendingUp, Award, Mail, ChevronRight,
     Sparkles, Clock, Star, AlertCircle, CheckCircle, Zap, ArrowRight,
     RefreshCw, Sun, Moon, Edit3, Save, Activity, Target, Download,
-    Menu, ChevronDown, Info, Phone,
+    Menu, ChevronDown, Info, Phone, Globe, ExternalLink,
 } from "lucide-react";
 import {
     Tooltip, ResponsiveContainer,
@@ -91,7 +91,7 @@ const MODELS = {
         key: "mpnet",
         name: "MPNet",
         short: "multi-qa-mpnet-base-dot-v1",
-        badge: "Best Accuracy",
+        badge: "Balanced performance",
         color: "#818cf8",
         desc: "Sentence-BERT (SBERT) model trained on 215M question-answer pairs using a Siamese network — the only true SBERT model in this system and the most semantically aware for resume matching.",
         detail: "768-dim · SBERT architecture · dot-product similarity · best for demos & high accuracy.",
@@ -109,9 +109,9 @@ const MODELS = {
         key: "arctic",
         name: "Arctic",
         short: "Snowflake/snowflake-arctic-embed-m-v1.5",
-        badge: "Top Ranking",
+        badge: "Optimized ranking",
         color: "#64d1ff",
-        desc: "Snowflake's enterprise embedding model — not SBERT, but a dedicated retrieval model optimised for high-precision document ranking and search at scale.",
+        desc: "Snowflake's enterprise embedding model — not SBERT, but a dedicated retrieval model optimised for high-precision query – document ranking like job description to resume matching and search at scale.",
         detail: "768-dim · MTEB top retrieval · enterprise-grade · ideal for high-precision screening.",
     },
 };
@@ -173,7 +173,7 @@ const GaugeArc = ({ value }) => {
             {/* Text overlay — absolutely placed inside the arc bowl */}
             <div style={{
                 position: "absolute",
-                bottom: 12,
+                bottom: 4,
                 left: 0, right: 0,
                 textAlign: "center",
                 lineHeight: 1,
@@ -200,21 +200,21 @@ const Badge = ({ status }) => {
     };
     const s = m[status] || m.Reviewing;
     return (
-        <span style={{ padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: s.bg, color: s.col, border: `1px solid ${s.col}40`, display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <span style={{ width: 5, height: 5, borderRadius: "50%", background: s.col }} />{status}
+        <span style={{ padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: s.bg, color: s.col, border: `1px solid ${s.col}40`, display: "inline-flex", alignItems: "center", gap: 5, lineHeight: 1.2 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: s.col, flexShrink: 0 }} />{status}
         </span>
     );
 };
 
 const SkillChip = ({ label, matched }) => (
     <span style={{
-        padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: 500,
+        padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 500,
         background: matched ? `${C.blue}22` : C.inputBg,
         color: matched ? C.blue : C.sub,
         border: `1px solid ${matched ? `${C.blue}44` : C.border}`,
-        display: "inline-flex", alignItems: "center", gap: 4,
+        display: "inline-flex", alignItems: "center", gap: 4, lineHeight: 1,
     }}>
-        {matched ? <Check size={9} /> : <X size={9} />} {label}
+        {matched ? <Check size={10} strokeWidth={2.5} /> : <X size={10} />} {label}
     </span>
 );
 
@@ -463,30 +463,61 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
 
                 {/* Info rows */}
                 <div style={card({ padding: "4px 16px" })}>
-                    {[
-                        { icon: Mail, label: "Email", value: c.email || "Not Found", href: c.email ? `mailto:${c.email}` : null },
-                        { icon: Clock, label: "Experience", value: !c.experience ? "Fresher" : `${c.experience} yrs`, href: null },
-                        { icon: Phone, label: "Phone", value: c.phone || "Not found", href: c.phone ? `tel:${c.phone.replace(/\s/g, "")}` : null },
-                    ].map(({ icon: Icon, label, value, href }) => (
-                        <div key={label} style={{ display: "flex", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.border}`, alignItems: "flex-start" }}>
-                            <Icon size={13} color={C.sub} style={{ marginTop: 2, flexShrink: 0 }} />
-                            <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: 10, color: C.sub }}>{label}</div>
-                                {href
-                                    ? <a href={href} style={{ fontSize: 13, color: C.blue, marginTop: 1, display: "block", textDecoration: "none", fontWeight: 500 }}
-                                        onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
-                                        onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>{value}</a>
-                                    : <div style={{ fontSize: 13, color: C.cardText, marginTop: 1 }}>{value}</div>
-                                }
+                    {(() => {
+                        const rows = [
+                            { icon: Mail, label: "Email", value: c.email || "Not Found", href: c.email ? `mailto:${c.email}` : null },
+                            { icon: Clock, label: "Experience", value: !c.experience ? "Fresher" : `${c.experience} yrs`, href: null },
+                            { icon: Phone, label: "Phone", value: c.phone || "Not found", href: c.phone ? `tel:${c.phone.replace(/\s/g, "")}` : null },
+                        ];
+                        return rows.map(({ icon: Icon, label, value, href }, idx) => (
+                            <div key={label} style={{ display: "flex", gap: 10, padding: "9px 0", borderBottom: idx < rows.length - 1 ? `1px solid ${C.border}` : "none", alignItems: "center" }}>
+                                <Icon size={13} color={C.sub} style={{ flexShrink: 0 }} />
+                                <div style={{ flex: 1 }}>
+                                    <div style={{ fontSize: 10, color: C.sub }}>{label}</div>
+                                    {href
+                                        ? <a href={href} style={{ fontSize: 13, color: C.blue, marginTop: 1, display: "block", textDecoration: "none", fontWeight: 500 }}
+                                            onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
+                                            onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>{value}</a>
+                                        : <div style={{ fontSize: 13, color: C.cardText, marginTop: 1 }}>{value}</div>
+                                    }
+                                </div>
                             </div>
-                        </div>
-                    ))}
-                    <div style={{ padding: "9px 0" }}>
+                        ));
+                    })()}
+                    <div style={{ padding: "9px 0", borderTop: `1px solid ${C.border}` }}>
                         <div style={{ fontSize: 10, color: C.sub, marginBottom: 5 }}>Status</div>
                         <Badge status={c.eligible ? "Shortlisted" : "Rejected"} />
                         {!c.eligible && c.rejection_reason && <div style={{ fontSize: 11, color: "#ef4444", marginTop: 5 }}>{c.rejection_reason}</div>}
                     </div>
                 </div>
+
+                {/* Links — LinkedIn / GitHub / Portfolio */}
+                {(c.links?.linkedin || c.links?.github || c.links?.portfolio) && (
+                    <div style={card({ padding: "4px 16px 12px" })}>
+                        <div style={{ fontSize: 10, color: C.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", padding: "8px 0 4px" }}>Links</div>
+                        {(() => {
+                            const items = [
+                                { icon: ExternalLink, label: "LinkedIn", value: c.links?.linkedin, color: "#0A66C2" },
+                                { icon: ExternalLink, label: "GitHub", value: c.links?.github, color: C.text },
+                                { icon: Globe, label: "Portfolio", value: c.links?.portfolio, color: C.teal },
+                            ].filter(l => l.value);
+                            return items.map(({ icon: Icon, label, value, color }, idx) => (
+                                <div key={label} style={{ display: "flex", gap: 10, padding: "8px 0", borderBottom: idx < items.length - 1 ? `1px solid ${C.border}` : "none", alignItems: "center" }}>
+                                    <Icon size={13} color={color} style={{ flexShrink: 0 }} />
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontSize: 10, color: C.sub }}>{label}</div>
+                                        <a href={value} target="_blank" rel="noopener noreferrer"
+                                            style={{ fontSize: 12, color: C.blue, display: "block", textDecoration: "none", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                                            onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
+                                            onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>
+                                            {value.replace(/^https?:\/\//, "")}
+                                        </a>
+                                    </div>
+                                </div>
+                            ));
+                        })()}
+                    </div>
+                )}
 
                 {/* Radar chart — same quality as analytics top-3 */}
                 {radarData.length >= 3 && (
@@ -1332,7 +1363,9 @@ const ProcessingView = ({ config, onDone, onSessionReady }) => {
                         const done = i < step;
                         const active = i === step;
                         return (
-                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 13px", borderRadius: 10, background: done ? `${C.green}08` : active ? `${modelInfo.color}0f` : C.inputBg, border: `1px solid ${done ? `${C.green}20` : active ? `${modelInfo.color}26` : C.border}`, transition: "all .3s" }}>
+                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 13px", borderRadius: 10, background: done ? `${C.green}08` : active ? `${modelInfo.color}0f` : C.inputBg, border: `1px solid ${done ? `${C.green}20` : active ? `${modelInfo.color}26` : C.border}`, transition: "all .3s", position: "relative", overflow: "hidden" }}>
+                                {/* Gradient left accent line for completed/active steps */}
+                                {(done || active) && <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, borderRadius: "3px 0 0 3px", background: done ? C.green : modelInfo.color, transition: "background .3s" }} />}
                                 <div style={{ width: 19, height: 19, borderRadius: "50%", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: done ? `${C.green}18` : active ? `${modelInfo.color}18` : "transparent", border: `1.5px solid ${done ? C.green : active ? modelInfo.color : C.muted}` }}>
                                     {done ? <Check size={9} color={C.green} />
                                         : active ? <div style={{ width: 7, height: 7, borderRadius: "50%", border: `2px solid ${modelInfo.color}`, borderTopColor: "transparent", animation: "spin .7s linear infinite" }} />
@@ -1531,24 +1564,34 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
             {eligible.length > 0 && (
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "360px 1fr", gap: 14, alignItems: "stretch" }}>
 
-                    {/* Top candidate card */}
+                    {/* Top candidate card — FIX: proper vertical rhythm + alignment */}
                     <FieldCard label="Top Candidate" dot={C.amber}>
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", paddingTop: 4 }}>
-                            <div style={{ marginBottom: 2 }}>
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "8px 0 4px" }}>
+
+                            {/* Gauge — centered with breathing room */}
+                            <div style={{ marginBottom: 12 }}>
                                 <GaugeArc value={topScore} />
-                                <div style={{ marginTop: 2, fontSize: 14, fontWeight: 800, color: C.text }}>{top.name}</div>
-                                <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>🥇 Rank #1</div>
                             </div>
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, width: "100%", marginBottom: 12 }}>
+
+                            {/* Name + Rank — clear separation from gauge */}
+                            <div style={{ marginBottom: 16 }}>
+                                <div style={{ fontSize: 15, fontWeight: 800, color: C.text, letterSpacing: "-0.01em" }}>{top.name}</div>
+                                <div style={{ fontSize: 10, color: C.muted, marginTop: 4 }}>🥇 Rank #1</div>
+                            </div>
+
+                            {/* Score cards — equal width, balanced spacing */}
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, width: "100%", marginBottom: 16 }}>
                                 {[["Skill", Math.round((top.skillScore || 0) * 100), C.blue], ["Semantic", Math.round((top.semanticScore || 0) * 100), C.teal]].map(([l, v, col]) => (
-                                    <div key={l} style={{ padding: "8px 10px", borderRadius: 10, background: `${col}08`, border: `1px solid ${col}16`, textAlign: "center" }}>
-                                        <div style={{ fontSize: 14, fontWeight: 900, color: col }}>{v}%</div>
-                                        <div style={{ fontSize: 9, color: C.muted, marginTop: 1 }}>{l}</div>
+                                    <div key={l} style={{ padding: "12px 14px", borderRadius: 12, background: `${col}0a`, border: `1px solid ${col}20`, textAlign: "center" }}>
+                                        <div style={{ fontSize: 18, fontWeight: 900, color: col, letterSpacing: "-0.02em" }}>{v}%</div>
+                                        <div style={{ fontSize: 9, color: C.muted, marginTop: 3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>{l}</div>
                                     </div>
                                 ))}
                             </div>
+
+                            {/* Matched skills — centered wrap with consistent gaps */}
                             {(top.matched_skills || []).length > 0 && (
-                                <div style={{ display: "flex", gap: 4, overflowX: "auto", scrollbarWidth: "none", width: "100%", justifyContent: "center", flexWrap: "wrap" }}>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center", width: "100%" }}>
                                     {(top.matched_skills || []).slice(0, 5).map(s => <SkillChip key={s} label={s} matched />)}
                                 </div>
                             )}
@@ -1573,7 +1616,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                                         style={{ display: "flex", alignItems: "center", gap: 9, borderRadius: 7, padding: "2px 4px", transition: "background .12s" }}
                                         onMouseEnter={e => e.currentTarget.style.background = C.tableFocus}
                                         onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                                        <div style={{ width: 20, textAlign: "center", flexShrink: 0, fontSize: i < 3 ? 12 : 9, color: C.muted, lineHeight: 1 }}>
+                                        <div style={{ width: 20, textAlign: "center", flexShrink: 0, fontSize: i < 3 ? 13 : 9, color: C.muted, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
                                             {i < 3 ? medals[i] : i + 1}
                                         </div>
                                         <div style={{ width: 110, fontSize: 11, color: C.text, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>{c.name}</div>
@@ -1820,15 +1863,19 @@ const CandidatesView = ({ results, onNav, isMobile }) => {
                         <tbody>
                             {filtered.map((c, i) => (
                                 <tr key={c.id} onClick={() => setSelected(c)}
-                                    style={{ borderBottom: `1px solid ${C.border}22`, cursor: "pointer", transition: "background .12s" }}
+                                    style={{ borderBottom: `1px solid ${C.border}22`, cursor: "pointer", transition: "all .18s ease" }}
                                     onMouseEnter={e => {
                                         e.currentTarget.style.background = C.tableFocus;
+                                        e.currentTarget.style.transform = "translateY(-1px)";
+                                        e.currentTarget.style.boxShadow = `0 2px 8px rgba(0,0,0,.08)`;
                                         const tds = e.currentTarget.querySelectorAll("td");
                                         const chevron = tds[tds.length - 1]?.querySelector("svg");
                                         if (chevron) chevron.style.transform = "translateX(3px)";
                                     }}
                                     onMouseLeave={e => {
                                         e.currentTarget.style.background = "transparent";
+                                        e.currentTarget.style.transform = "none";
+                                        e.currentTarget.style.boxShadow = "none";
                                         const tds = e.currentTarget.querySelectorAll("td");
                                         const chevron = tds[tds.length - 1]?.querySelector("svg");
                                         if (chevron) chevron.style.transform = "translateX(0)";
@@ -2493,7 +2540,7 @@ const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
                                             </div>
                                             {/* Matched skills */}
                                             {(c.matched_skills || []).length > 0 && (
-                                                <div style={{ padding: "0 14px 14px", display: "flex", flexWrap: "wrap", gap: 4, flex: 1 }}>
+                                                <div style={{ padding: "0 14px 14px", display: "flex", flexWrap: "wrap", gap: 6, flex: 1 }}>
                                                     {(c.matched_skills || []).map(s => (
                                                         <span key={s} style={{ fontSize: 9, padding: "2px 8px", borderRadius: 20, background: `${glow}10`, color: glow, border: `1px solid ${glow}20`, fontWeight: 600 }}>{s}</span>
                                                     ))}
@@ -3166,9 +3213,12 @@ export default function App() {
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [backendOnline, setBackendOnline] = useState(null); // null=checking, true=online, false=offline
 
-    // Poll /api/health every 5 s to show live backend status in the sidebar.
+    // Poll /api/health with exponential backoff on failure.
     // BASE is a module constant; setBackendOnline is a stable setter — empty deps intentional.
     useEffect(() => {
+        let intervalMs = 5000; // normal polling interval
+        let timerId = null;
+        const MAX_INTERVAL = 30000; // max 30s backoff
         const check = async () => {
             try {
                 const ctrl = new AbortController();
@@ -3176,13 +3226,15 @@ export default function App() {
                 const res = await fetch(`${BASE}/api/health`, { signal: ctrl.signal });
                 clearTimeout(t);
                 setBackendOnline(res.ok);
+                intervalMs = 5000; // reset on success
             } catch {
                 setBackendOnline(false);
+                intervalMs = Math.min(intervalMs * 1.5, MAX_INTERVAL); // backoff on failure
             }
+            timerId = setTimeout(check, intervalMs);
         };
         check(); // run immediately on mount
-        const id = setInterval(check, 5000);
-        return () => clearInterval(id);
+        return () => { if (timerId) clearTimeout(timerId); };
     }, []); // BASE is a module constant — intentional empty deps
 
     // Save profile to state and persist to localStorage

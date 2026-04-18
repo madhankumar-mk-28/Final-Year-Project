@@ -305,7 +305,7 @@ def _skill_score(
     if not required_skills:
         return 1.0, [], [], [], []
 
-    candidate_lower = {_normalise_skill_text(s) for s in candidate_skills if s}
+    candidate_lower = {_normalise_skill_text(s) for s in candidate_skills if s}  # FIX: guard against None
     sem_matched_norm = (
         {_normalise_skill_text(s) for s in semantic_matches} if semantic_matches else set()
     )
@@ -359,7 +359,7 @@ def _check_hard_eligibility(info: dict, config: ScoringConfig) -> Tuple[bool, st
 
 
 def is_eligible(info: dict, config: ScoringConfig,
-                skill_score: float = None) -> tuple:  # pyright: ignore
+                skill_score: Optional[float] = None) -> tuple:  # pyright: ignore
     """Thin compatibility wrapper around _check_hard_eligibility for external callers."""
     eligible, reason, _ = _check_hard_eligibility(info, config)
     if not eligible:
@@ -453,6 +453,7 @@ def score_candidates(candidates: list, required_skills: list,
             "skills_negated":   negated_skills,
             "experience_years": exp_years,
             "education":        info.get("education", []),
+            "links":            info.get("links", {"linkedin": "", "github": "", "portfolio": ""}),
             "skill_score":      round(skill_score, 4),
             "semantic_score":   round(semantic_score, 4),
             "exp_score":        round(exp_score, 4),

@@ -78,6 +78,8 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     except PermissionError as e:
         logger.error("[resume_parser] Permission denied reading %s: %s", fname, e)
         return ""
+    except pdfplumber.pdfminer.pdfparser.PDFSyntaxError as e:
+        logger.warning("[resume_parser] PDF syntax error (possibly corrupted) for %s: %s", fname, e)
     except Exception as e:
         logger.warning("[resume_parser] pdfplumber failed for %s: %s", fname, e)
 
@@ -89,7 +91,13 @@ def extract_text_from_pdf(pdf_path: str) -> str:
                 text = fitz_text
                 logger.info("[resume_parser] PyMuPDF → %s (%d chars)", fname, len(text))
         except Exception as e:
-            logger.warning("[resume_parser] PyMuPDF also failed for %s: %s", fname, e)
+            # FIX: Previous getattr(fitz, 'FileDataError', Exception) could catch BaseException
+            err_type = type(e).__name__
+            is_corrupted = err_type == "FileDataError"
+            logger.warning(
+                "[resume_parser] PyMuPDF failed for %s [%s%s]: %s",
+                fname, err_type, " (corrupted PDF)" if is_corrupted else "", e,
+            )
 
     if not text:
         logger.error("[resume_parser] Could not extract any text from %s", fname)

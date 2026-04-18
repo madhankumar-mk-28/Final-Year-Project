@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+from datetime import datetime
 
 logger = logging.getLogger("information_extractor")
 
@@ -120,6 +121,42 @@ _EDU_MIN_LEN = 15
 _EDU_LEADING_FRAGMENT_RE = re.compile(r"^[a-z]+\s+")
 
 # ---------------------------------------------------------------------------
+# Name extraction constants
+# ---------------------------------------------------------------------------
+
+# Section headings that should NOT be treated as candidate names.
+_NAME_NOISE_RE = re.compile(
+    r"^(resume|curriculum\s*vitae|cv|profile|summary|objective|personal\s+info"
+    r"|contact|about\s+me|career|experience|education|skills|projects|cover\s+letter"
+    r"|references|declaration|portfolio)$",
+    re.IGNORECASE,
+)
+
+# A plausible name line: 2-5 words, only letters/spaces/hyphens/periods/apostrophes,
+# no digits, no email-like '@' or URL-like patterns.
+_NAME_VALID_RE = re.compile(
+    r"^[A-Za-z][A-Za-z .\-']{1,60}$"
+)
+
+# ---------------------------------------------------------------------------
+# Link extraction patterns
+# ---------------------------------------------------------------------------
+
+_LINKEDIN_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?linkedin\.com/in/([\w\-%.]+)/?",
+    re.IGNORECASE,
+)
+_GITHUB_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/([\w\-]+)/?",
+    re.IGNORECASE,
+)
+_PORTFOLIO_RE = re.compile(
+    r"(https?://(?!(?:www\.)?(?:linkedin|github|google|facebook|twitter|instagram|youtube)\.com)"
+    r"[\w\-]+\.[\w\-.]+(?:/[\w\-./]*)?)",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
 # Experience extraction constants — at module level so they compile once
 # ---------------------------------------------------------------------------
 
@@ -132,6 +169,16 @@ _EXP_WORK_PATTERNS = [
     r"worked\s+for\s+(\d+(?:\.\d+)?)\s*\+?\s*years?",
     r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:professional\s+)?(?:work\s+)?experience",
 ]
+
+# Date-range pattern for employment history:
+#   Jan 2020 – Dec 2023, 06/2019 - 12/2019, 2020 - Present, etc.
+_MONTH_NAMES = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+_DATE_RANGE_RE = re.compile(
+    r"(?:" + _MONTH_NAMES + r"[.,]?\s*)?(?:\d{1,2}[/\-.])?\s*(\d{4})"
+    r"\s*(?:–|—|\-|to)\s*"
+    r"(?:(?:" + _MONTH_NAMES + r"[.,]?\s*)?(?:\d{1,2}[/\-.])?\s*(\d{4}|present|current|ongoing|till\s+date|now))",
+    re.IGNORECASE,
+)
 
 # Lines containing any of these words are treated as academic context.
 # Year figures on such lines are used only as a last-resort fallback,
@@ -156,21 +203,41 @@ _EXP_MAX_YEARS = 15.0
 def extract_all(text: str, filename: str = "") -> dict:
     """Extract all structured fields from resume text.
 
-    Uses the filename as the candidate's name when the text itself does not
-    contain a clear name at the top of the document.
+    Uses filename-derived name as the primary source (more reliable for Indian
+    names). Falls back to text-based name extraction only when the filename
+    yields 'Unknown' (e.g. files named 'resume.pdf' or 'document.pdf').
     """
+    # Name: filename first (reliable for Indian names), text-based as fallback
+    file_name = name_from_filename(filename) if filename else "Unknown"
+    if file_name == "Unknown":
+        text_name = extract_name_from_text(text)
+        name = text_name if text_name and text_name != "Unknown" else file_name
+    else:
+        name = file_name
+
+    # IMPROVED: Each extractor is wrapped individually so a failure in one
+    # (e.g. a regex crash on malformed text) doesn't lose all other fields.
+    def _safe(fn, *args, default=None):
+        try:
+            return fn(*args)
+        except Exception as exc:
+            logger.warning("[extractor] %s failed for %s: %s", fn.__name__, filename or "?", exc)
+            return default
+
     result = {
-        "name":             name_from_filename(filename) if filename else "Unknown",
-        "email":            extract_email(text),
-        "phone":            extract_phone(text),
-        "skills":           extract_skills(text),
-        "experience_years": extract_experience_years(text),
-        "education":        extract_education(text),
+        "name":             name,
+        "email":            _safe(extract_email, text, default=""),
+        "phone":            _safe(extract_phone, text, default=""),
+        "skills":           _safe(extract_skills, text, default=[]),
+        "experience_years": _safe(extract_experience_years, text, default=0.0),
+        "education":        _safe(extract_education, text, default=[]),
+        "links":            _safe(extract_links, text, default={"linkedin": "", "github": "", "portfolio": ""}),
     }
     logger.info(
-        "[extractor] %s → name=%s | email=%s | skills=%d | exp=%.1f yrs | edu=%d",
+        "[extractor] %s → name=%s | email=%s | skills=%d | exp=%.1f yrs | edu=%d | links=%d",
         filename or "?", result["name"], result["email"] or "—",
         len(result["skills"]), result["experience_years"], len(result["education"]),
+        sum(1 for v in result["links"].values() if v),
     )
     return result
 
@@ -312,6 +379,10 @@ def extract_experience_years(text: str) -> float:
         return max(work_matches)
     if fallback_matches:
         return max(fallback_matches)
+    # Last-resort fallback: compute from date ranges in employment history
+    date_exp = _extract_date_range_experience(text)
+    if date_exp > 0.0:
+        return min(date_exp, _EXP_MAX_YEARS)
     return 0.0
 
 
@@ -348,7 +419,6 @@ def extract_education(text: str) -> list:
     Each extracted line is cleaned to remove leading word-fragments, embedded
     newlines, and short noise strings before being returned.
     """
-    lines = text.splitlines()
     found: list[str] = []
     seen: set[str] = set()
 
@@ -382,3 +452,150 @@ def extract_education(text: str) -> list:
             found.append(entry)
 
     return found
+
+
+def extract_name_from_text(text: str) -> str:
+    """Extract the candidate's name from the top of the resume text.
+
+    Heuristic: the name is almost always in the first 5 non-empty lines.
+    A valid name line must be:
+      - 2 to 5 words long
+      - Only letters, spaces, hyphens, periods, and apostrophes
+      - Not a section heading (RESUME, CURRICULUM VITAE, etc.)
+      - Not contain digits, emails, phone numbers, or URLs
+
+    Returns 'Unknown' if no plausible name is found.
+    """
+    lines = text.strip().splitlines()
+    candidates = []
+
+    for line in lines[:15]:  # scan first 15 raw lines
+        stripped = line.strip()
+        if not stripped or len(stripped) < 3:
+            continue
+
+        # Skip lines with emails, phone numbers, or URLs
+        if "@" in stripped or re.search(r"\d{5,}", stripped):
+            continue
+        if re.search(r"https?://|www\.", stripped, re.IGNORECASE):
+            continue
+
+        # Skip known section headings
+        if _NAME_NOISE_RE.fullmatch(stripped.strip("  \t:-•|/")):
+            continue
+
+        # Check if it looks like a name: letters/spaces/hyphens only, 2-5 words
+        clean = re.sub(r"[^A-Za-z .\-']", "", stripped).strip()
+        if not clean or len(clean) < 3:
+            continue
+
+        words = clean.split()
+        if len(words) < 2 or len(words) > 5:
+            continue
+
+        # Must match valid name pattern
+        if not _NAME_VALID_RE.match(clean):
+            continue
+
+        # Prefer title-case or ALL-CAPS lines (typical for names)
+        # The first high-confidence match wins (earliest line = most likely the name)
+        if (clean.istitle() or clean.isupper()) and not candidates:
+            candidates.insert(0, clean)  # first high confidence → front
+        else:
+            candidates.append(clean)
+
+        if len(candidates) >= 3:
+            break
+
+    if not candidates:
+        return "Unknown"
+
+    # Return the best candidate, title-cased
+    best = candidates[0]
+    return best.title() if best.isupper() else best
+
+
+def extract_links(text: str) -> dict:
+    """Extract LinkedIn, GitHub, and portfolio URLs from resume text.
+
+    Returns a dict with keys 'linkedin', 'github', 'portfolio'.
+    Each value is the full URL string, or an empty string if not found.
+    """
+    links = {"linkedin": "", "github": "", "portfolio": ""}
+
+    m = _LINKEDIN_RE.search(text)
+    if m:
+        raw = m.group(0)
+        links["linkedin"] = raw if raw.startswith("http") else f"https://{raw}"
+
+    m = _GITHUB_RE.search(text)
+    if m:
+        # Exclude common false positives (github.com/topics, github.com/features, etc.)
+        username = m.group(1).lower()
+        if username not in {"topics", "features", "explore", "settings", "login", "signup", "about"}:
+            raw = m.group(0)
+            links["github"] = raw if raw.startswith("http") else f"https://{raw}"
+
+    m = _PORTFOLIO_RE.search(text)
+    if m:
+        links["portfolio"] = m.group(1)
+
+    return links
+
+
+def _extract_date_range_experience(text: str) -> float:
+    """Calculate total years of professional experience from date ranges.
+
+    Scans for patterns like 'Jan 2020 – Dec 2023', '2019 - Present' and
+    sums non-overlapping employment periods.  Academic lines are excluded.
+
+    Returns 0.0 if no valid date ranges are found.
+    """
+    periods = []
+    now = datetime.now()
+
+    for line in text.splitlines():
+        # Skip academic context lines
+        if _EXP_ACADEMIC_RE.search(line):
+            continue
+
+        for m in _DATE_RANGE_RE.finditer(line):
+            start_year_str = m.group(1)
+            end_str = m.group(2).strip().lower()
+
+            try:
+                start_year = int(start_year_str)
+            except (ValueError, TypeError):
+                continue
+
+            if end_str in {"present", "current", "ongoing", "now"} or end_str.startswith("till"):
+                end_year = now.year
+            else:
+                try:
+                    end_year = int(end_str)
+                except (ValueError, TypeError):
+                    continue
+
+            # Sanity checks
+            if start_year < 1970 or start_year > now.year:
+                continue
+            if end_year < start_year or end_year > now.year + 1:
+                continue
+
+            periods.append((start_year, end_year))
+
+    if not periods:
+        return 0.0
+
+    # Merge overlapping periods to avoid double-counting
+    periods.sort()
+    merged = [periods[0]]
+    for start, end in periods[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+
+    total = sum(end - start for start, end in merged)
+    return round(float(total), 1)

@@ -1,9 +1,13 @@
 """
 app.py — Flask backend for the AI Resume Screening System.
-Endpoints: /api/health, /api/upload-resumes, /api/screen, /api/result/<id>, /api/config, /api/model, /api/clear
+Endpoints: /api/health, /api/upload-resumes, /api/screen, /api/result/<id>, /api/config, /api/model, /api/clear,
+           /api/stats, /api/result/<task_id>/export, /api/validate-jd
 Run: python app.py  →  http://localhost:5001
 """
 from __future__ import annotations
+
+__version__ = "1.1.0"
+
 
 
 import atexit
@@ -20,8 +24,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import csv
+import io
+
 import numpy as np
-from flask import Flask, g, request, jsonify, redirect
+from flask import Flask, Response, g, request, jsonify, redirect
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
@@ -95,6 +102,30 @@ SLOW_REQUEST_THRESHOLD_S  = 20.0   # log WARNING if request exceeds this duratio
 TASK_TTL_S                = 3600   # async task expiry (1 hour)
 TASK_STORE_LIMIT          = 60     # max in-memory task entries (evict oldest beyond this)
 
+# Structured API error codes — machine-readable companion to human-friendly error messages
+API_ERROR = {
+    "no_files":         "NO_FILES_PROVIDED",
+    "invalid_session":  "INVALID_SESSION_ID",
+    "session_missing":  "SESSION_NOT_FOUND",
+    "jd_too_short":     "JD_TOO_SHORT",
+    "rate_limited":     "RATE_LIMITED",
+    "overloaded":       "SERVER_OVERLOADED",
+    "disk_full":        "DISK_FULL",
+    "bad_model":        "UNKNOWN_MODEL",
+    "bad_config":       "INVALID_CONFIG",
+    "bad_skills":       "INVALID_SKILLS",
+    "too_many_files":   "TOO_MANY_FILES",
+    "no_valid_pdfs":    "NO_VALID_PDFS",
+    "no_resumes":       "NO_RESUMES_IN_SESSION",
+    "task_expired":     "TASK_EXPIRED",
+    "task_not_found":   "TASK_NOT_FOUND",
+    "payload_too_large":"PAYLOAD_TOO_LARGE",
+    "bad_task_id":      "INVALID_TASK_ID",
+    "not_found":        "NOT_FOUND",
+    "internal_error":   "INTERNAL_ERROR",
+    "pipeline_error":   "PIPELINE_ERROR",
+}
+
 # Allowed embedding models
 VALID_MODELS = {
     "mpnet":  MPNET_MODEL,
@@ -127,6 +158,20 @@ DEFAULT_CONFIG = {
         "min_final_score":      0.0,
     },
 }
+
+
+# Input sanitisation — strip HTML tags and control chars from user-supplied text
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_text(text: str) -> str:
+    """Strip HTML tags, control characters, and collapse excessive whitespace."""
+    text = _HTML_TAG_RE.sub("", text)
+    text = _CONTROL_CHAR_RE.sub("", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)     # collapse 3+ newlines
+    text = re.sub(r"[ \t]{4,}", "  ", text)     # collapse excessive spaces/tabs
+    return text.strip()
 
 
 # Request timing hooks — log slow requests (>20s) as WARNING, others as DEBUG
@@ -391,13 +436,9 @@ def _startup_init():
     removed = cleanup_stale_sessions(max_age_seconds=7200)
     logger.info("[Startup] Startup cleanup — %d session(s) removed.", removed)
 
-    # Pre-load the default model so the first /api/screen call is not cold
-    try:
-        logger.info("[Startup] Pre-loading default model '%s'...", VALID_MODELS["mpnet"])
-        _sm_get_model(VALID_MODELS["mpnet"])
-        logger.info("[Startup] Default model ready.")
-    except Exception as exc:
-        logger.warning("[Startup] Model warmup skipped: %s", exc)
+    # Lazy model loading — model is loaded on first /api/screen call instead of at
+    # startup, allowing the server to accept health-check / upload requests immediately.
+    logger.info("[Startup] Model loading deferred to first /api/screen call (lazy).")
 
     # Register executor shutdown on SIGTERM/atexit — prevents stranded _active_screenings counter
     atexit.register(lambda: _screening_executor.shutdown(wait=False, cancel_futures=True))
@@ -500,6 +541,7 @@ def serialize_results(results: list, skills_configured: bool = True) -> list:
             "dynamic_threshold": r.get("dynamic_threshold", 0.5),
             "fn_recovered":      r.get("fn_recovered", False),
             "skills_configured": skills_configured,
+            "links":            {k: (v or "") for k, v in r.get("links", {"linkedin": "", "github": "", "portfolio": ""}).items()},
         })
     return serialized
 
@@ -791,7 +833,7 @@ def _run_screening_pipeline(
             "merged_count":          merged_count,
             "elapsed_seconds":       round(elapsed_s, 2),
             "job_description":       (job_description or "")[:MAX_AUDIT_JD_CHARS],
-            "job_description_hash":  hashlib.md5((job_description or "").encode()).hexdigest()[:12],
+            "job_description_hash":  hashlib.md5((job_description or "").encode(), usedforsecurity=False).hexdigest()[:12],
             "required_skills":       required_skills,
             "skill_weight":          round(scoring_cfg.skill_weight, 2),
             "semantic_weight":       round(scoring_cfg.semantic_weight, 2),
@@ -859,6 +901,7 @@ def health():
 
     return jsonify({
         "status":            "ok",
+        "version":           __version__,
         "timestamp":         datetime.now(timezone.utc).isoformat(),
         "available_models":  list(VALID_MODELS.keys()),
         "pdfs_uploaded":     pdfs,
@@ -876,16 +919,16 @@ def upload_resumes():
     if _is_rate_limited(ip):
         _inc("total_rate_limited")
         logger.warning("[RateLimit] Upload blocked for %s", ip)
-        return jsonify({"error": "Too many requests. Please wait a minute."}), 429
+        return jsonify({"error": "Too many requests. Please wait a minute.", "code": API_ERROR["rate_limited"]}), 429
 
     if not _disk_space_ok():
         logger.error("[Overload] Upload rejected — insufficient disk space.")
-        return jsonify({"error": "Server storage is temporarily full. Try again later."}), 503
+        return jsonify({"error": "Server storage is temporarily full. Try again later.", "code": API_ERROR["disk_full"]}), 503
 
     _inc("total_upload_requests")
 
     if "files" not in request.files:
-        return jsonify({"error": "No files provided"}), 400
+        return jsonify({"error": "No files provided", "code": API_ERROR["no_files"]}), 400
 
     session_id     = uuid.uuid4().hex
     session_folder = UPLOAD_BASE / session_id
@@ -894,7 +937,7 @@ def upload_resumes():
     files = request.files.getlist("files")
     if len(files) > MAX_FILES_PER_SESSION:
         shutil.rmtree(session_folder, ignore_errors=True)
-        return jsonify({"error": f"Too many files. Maximum {MAX_FILES_PER_SESSION} per session."}), 400
+        return jsonify({"error": f"Too many files. Maximum {MAX_FILES_PER_SESSION} per session.", "code": API_ERROR["too_many_files"]}), 400
 
     saved, rejected, duplicates = [], [], []
     existing_hashes_map = _existing_hashes(session_folder)
@@ -951,7 +994,7 @@ def upload_resumes():
 
     if not saved and not duplicates:
         shutil.rmtree(session_folder, ignore_errors=True)
-        return jsonify({"error": "No valid PDF files uploaded", "rejected": rejected}), 400
+        return jsonify({"error": "No valid PDF files uploaded", "rejected": rejected, "code": API_ERROR["no_valid_pdfs"]}), 400
 
     logger.info("[Upload] Session %s created with %d file(s).", session_id, len(saved))
     return jsonify({
@@ -976,7 +1019,7 @@ def screen():
     if _is_rate_limited(ip):
         _inc("total_rate_limited")
         logger.warning("[RateLimit] Screen blocked for %s", ip)
-        return jsonify({"error": "Too many requests. Please wait a minute."}), 429
+        return jsonify({"error": "Too many requests. Please wait a minute.", "code": API_ERROR["rate_limited"]}), 429
 
     _inc("total_screen_requests")
 
@@ -985,23 +1028,24 @@ def screen():
 
     session_id = body.get("session_id", "")
     if not session_id:
-        return jsonify({"error": "Missing session_id. Upload resumes first."}), 400
+        return jsonify({"error": "Missing session_id. Upload resumes first.", "code": API_ERROR["invalid_session"]}), 400
     if not _validate_session_id(session_id):
-        return jsonify({"error": "Invalid session_id format."}), 400
+        return jsonify({"error": "Invalid session_id format.", "code": API_ERROR["invalid_session"]}), 400
 
     session_folder = UPLOAD_BASE / session_id
     if not session_folder.is_dir():
-        return jsonify({"error": f"Session '{session_id}' not found. Upload resumes first."}), 404
+        return jsonify({"error": f"Session '{session_id}' not found. Upload resumes first.", "code": API_ERROR["session_missing"]}), 404
 
-    job_description = (body.get("job_description") or cfg.get("job_description", ""))[:MAX_JD_CHARS]
+    raw_jd = (body.get("job_description") or cfg.get("job_description", ""))[:MAX_JD_CHARS]
+    job_description = _sanitize_text(raw_jd)
     if not job_description or len(job_description.strip()) < 20:
-        return jsonify({"error": "Job description is required (minimum 20 characters)."}), 400
+        return jsonify({"error": "Job description is required (minimum 20 characters).", "code": API_ERROR["jd_too_short"]}), 400
 
     required_skills = body.get("required_skills") or cfg.get("required_skills", [])
     if isinstance(required_skills, str):
         required_skills = [s.strip() for s in required_skills.split(",") if s.strip()]
     elif not isinstance(required_skills, list):
-        return jsonify({"error": "required_skills must be a list of strings."}), 400
+        return jsonify({"error": "required_skills must be a list of strings.", "code": API_ERROR["bad_skills"]}), 400
 
     # Normalize, deduplicate, and cap the skills list
     required_skills = list(dict.fromkeys(
@@ -1012,7 +1056,7 @@ def screen():
 
     model_key = body.get("model") or cfg.get("model", "mpnet")
     if model_key not in VALID_MODELS:
-        return jsonify({"error": f"Unknown model '{model_key}'. Valid options: {list(VALID_MODELS)}"}), 400
+        return jsonify({"error": f"Unknown model '{model_key}'. Valid options: {list(VALID_MODELS)}", "code": API_ERROR["bad_model"]}), 400
     model_name = VALID_MODELS[model_key]
 
     cfg_override   = body.get("config", {})
@@ -1021,11 +1065,11 @@ def screen():
     try:
         scoring_cfg = ScoringConfig(**scoring_params)
     except Exception as e:
-        return jsonify({"error": f"Invalid scoring config: {e}"}), 400
+        return jsonify({"error": f"Invalid scoring config: {e}", "code": API_ERROR["bad_config"]}), 400
 
     pdf_files = list(session_folder.glob("*.pdf"))
     if not pdf_files:
-        return jsonify({"error": "No resumes found in session. Upload PDFs first."}), 400
+        return jsonify({"error": "No resumes found in session. Upload PDFs first.", "code": API_ERROR["no_resumes"]}), 400
 
     # Concurrency guard — increment before submitting to prevent burst overload
     with _active_screenings_lock:
@@ -1035,7 +1079,7 @@ def screen():
                 "[Overload] Screen rejected — %d/%d slots in use.",
                 _active_screenings, MAX_CONCURRENT_SCREENINGS,
             )
-            return jsonify({"error": "Server is busy. Please try again shortly."}), 503
+            return jsonify({"error": "Server is busy. Please try again shortly.", "code": API_ERROR["overloaded"]}), 503
         _active_screenings += 1
 
     started_at = datetime.now(timezone.utc)
@@ -1118,11 +1162,11 @@ def screen():
 def get_result(task_id: str):
     """Poll endpoint for async screening results. Returns 202 while pending/running, 200 when done."""
     if not re.fullmatch(r"[a-f0-9]{32}", task_id):
-        return jsonify({"error": "Invalid task_id format."}), 400
+        return jsonify({"error": "Invalid task_id format.", "code": API_ERROR["bad_task_id"]}), 400
 
     task = _task_get(task_id)
     if task is None:
-        return jsonify({"error": "Task not found. It may have expired (TTL 1hr)."}), 404
+        return jsonify({"error": "Task not found. It may have expired (TTL 1hr).", "code": API_ERROR["task_expired"]}), 404
 
     status = task.get("status", "unknown")
     if status in ("pending", "running"):
@@ -1150,7 +1194,11 @@ def post_config():
     body = request.get_json(silent=True)
     if not body:
         return jsonify({"error": "No JSON body provided"}), 400
-    if len(json.dumps(body)) > MAX_CONFIG_BYTES:
+    try:
+        body_size = len(json.dumps(body))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Config payload contains non-serializable data."}), 400
+    if body_size > MAX_CONFIG_BYTES:
         return jsonify({"error": "Config payload too large."}), 413
 
     sanitized = {k: v for k, v in body.items() if k in ALLOWED_CONFIG_KEYS}
@@ -1208,10 +1256,202 @@ def clear_uploads():
 
     results_file = _session_results_file(session_id)
     if results_file.exists():
-        results_file.unlink()
+        results_file.unlink(missing_ok=True)  # FIX: race with cleanup_worker
         logger.info("[Clear] Session results cleared: %s", session_id)
 
     return jsonify({"message": "Session cleared."}), 200
+
+
+# ── Global error handlers — return JSON for all error types ────────────────
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"error": "Endpoint not found", "code": API_ERROR["not_found"]}), 404
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    logger.error("[ErrorHandler] 500 Internal Server Error: %s", e)
+    return jsonify({"error": "Internal server error", "code": API_ERROR["internal_error"]}), 500
+
+
+@app.errorhandler(413)
+def handle_413(e):
+    return jsonify({"error": "Request payload too large", "code": API_ERROR["payload_too_large"]}), 413
+
+
+# ── GET /api/stats — aggregate historical screening statistics ─────────────
+
+@app.route("/api/stats", methods=["GET"])
+def get_stats():
+    """Return aggregate screening statistics from metrics_log.jsonl."""
+    try:
+        load_all_runs = getattr(metrics_store, "load_all_runs", None)
+        if not callable(load_all_runs):
+            return jsonify({"error": "metrics_store.load_all_runs not available"}), 501
+
+        runs = load_all_runs()
+        if not runs:
+            return jsonify({
+                "total_runs": 0,
+                "total_resumes_screened": 0,
+                "models_used": {},
+                "avg_score_by_model": {},
+            }), 200
+
+        total_runs = len(runs)
+        total_resumes = 0
+        models_used = {}
+        score_sums = {}
+        score_counts = {}
+
+        for run in runs:
+            model = run.get("model_key", "unknown")
+            models_used[model] = models_used.get(model, 0) + 1
+
+            finals = run.get("final_scores", [])
+            n = len(finals) if isinstance(finals, list) else 0
+            total_resumes += n
+
+            if isinstance(finals, list):
+                for c in finals:
+                    fs = c.get("finalScore", 0) if isinstance(c, dict) else 0
+                    score_sums[model] = score_sums.get(model, 0) + fs
+                    score_counts[model] = score_counts.get(model, 0) + 1
+
+        avg_by_model = {
+            m: round(score_sums.get(m, 0) / score_counts[m] * 100)
+            for m in score_counts if score_counts[m] > 0
+        }
+
+        return jsonify({
+            "total_runs":             total_runs,
+            "total_resumes_screened": total_resumes,
+            "models_used":           models_used,
+            "avg_score_by_model":    avg_by_model,
+        }), 200
+
+    except Exception as exc:
+        logger.error("[Stats] Failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+# ── GET /api/result/<task_id>/export — CSV export of screening results ──────
+
+@app.route("/api/result/<task_id>/export", methods=["GET"])
+def export_result(task_id: str):
+    """Download screening results as a CSV file."""
+    if not re.fullmatch(r"[a-f0-9]{32}", task_id):
+        return jsonify({"error": "Invalid task_id format.", "code": API_ERROR["bad_task_id"]}), 400
+
+    task = _task_get(task_id)
+    if task is None:
+        return jsonify({"error": "Task not found.", "code": API_ERROR["task_expired"]}), 404
+
+    result = task.get("result", {})
+    candidates = result.get("results", [])
+    if not candidates:
+        return jsonify({"error": "No results available for export."}), 404
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Rank", "Name", "Email", "Phone", "Final Score", "Skill Score",
+                     "Semantic Score", "Status", "Band", "LinkedIn", "GitHub"])
+
+    for c in candidates:
+        links = c.get("links", {})
+        writer.writerow([
+            c.get("rank", ""),
+            c.get("name", "Unknown"),
+            c.get("email", ""),
+            c.get("phone", ""),
+            f"{round((c.get('finalScore', 0)) * 100)}%",
+            f"{round((c.get('skillScore', 0)) * 100)}%",
+            f"{round((c.get('semanticScore', 0)) * 100)}%",
+            c.get("status", ""),
+            c.get("band", ""),
+            links.get("linkedin", ""),
+            links.get("github", ""),
+        ])
+
+    csv_content = output.getvalue()
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=screening_{task_id[:8]}.csv"},
+    )
+
+
+# ── POST /api/validate-jd — job description quality scorer ─────────────────
+
+@app.route("/api/validate-jd", methods=["POST"])
+def validate_jd():
+    """Score a job description for quality and provide improvement suggestions."""
+    body = request.get_json(silent=True) or {}
+    jd = _sanitize_text(body.get("job_description", ""))
+
+    if not jd:
+        return jsonify({"quality_score": 0, "suggestions": ["Provide a job description."]}), 200
+
+    suggestions = []
+    score = 0.0
+
+    # Length scoring
+    word_count = len(jd.split())
+    if word_count >= 80:
+        score += 0.25
+    elif word_count >= 40:
+        score += 0.15
+        suggestions.append("Add more detail — aim for at least 80 words for best results.")
+    else:
+        score += 0.05
+        suggestions.append("Job description is very short. Add responsibilities and requirements.")
+
+    # Keyword diversity
+    jd_lower = jd.lower()
+    role_keywords = [
+        "responsible", "requirements", "qualifications", "experience",
+        "proficiency", "skills", "ability", "knowledge", "team",
+        "develop", "design", "manage", "implement", "analyze",
+    ]
+    matched_keywords = sum(1 for kw in role_keywords if kw in jd_lower)
+    kw_ratio = matched_keywords / len(role_keywords)
+    score += kw_ratio * 0.30
+    if matched_keywords < 3:
+        suggestions.append("Include more role-specific language (e.g. responsibilities, qualifications, requirements).")
+
+    # Section detection
+    sections = ["responsibilities", "requirements", "qualifications", "experience", "education", "skills"]
+    found_sections = sum(1 for s in sections if s in jd_lower)
+    if found_sections >= 2:
+        score += 0.20
+    else:
+        suggestions.append("Structure your JD with clear sections (e.g. Responsibilities, Requirements).")
+    
+    # Specificity — presence of technical terms or tools
+    has_technical = bool(re.search(
+        r"\b(python|java|sql|aws|react|node|docker|kubernetes|machine learning|api|database|cloud|git|agile)\b",
+        jd_lower,
+    ))
+    if has_technical:
+        score += 0.15
+    else:
+        suggestions.append("Mention specific technologies, tools, or methodologies for better matching.")
+
+    # Bonus for mentioning experience level
+    if re.search(r"\d+\s*\+?\s*years?", jd_lower):
+        score += 0.10
+    else:
+        suggestions.append("Specify required years of experience for more accurate screening.")
+
+    quality_score = round(min(score, 1.0), 2)
+
+    return jsonify({
+        "quality_score": quality_score,
+        "word_count":    word_count,
+        "suggestions":   suggestions if quality_score < 0.85 else [],
+        "rating":        "Excellent" if quality_score >= 0.80 else "Good" if quality_score >= 0.60 else "Needs Improvement",
+    }), 200
 
 
 # Entry point — _startup_init() already ran at module level above
@@ -1219,7 +1459,7 @@ def clear_uploads():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     print("=" * 58)
-    print("  ML-Based Resume Screening System — Flask API")
+    print(f"  ML-Based Resume Screening System v{__version__} — Flask API")
     print(f"  Running on port {port}")
     print(f"  Default model   : {VALID_MODELS['mpnet']}")
     print(f"  Available models: {', '.join(VALID_MODELS)}")

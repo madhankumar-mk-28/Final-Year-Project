@@ -145,7 +145,7 @@ def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
                 logger.error("[SemanticMatcher] Failed to load model '%s': %s", model_name, exc)
                 raise RuntimeError(
                     f"Could not load model '{model_name}'. "
-                    f"Download it first: python -m sentence_transformers download '{model_name}'. "
+                    f"Pre-download: python3 -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('{model_name}')\" "
                     f"Detail: {exc}"
                 ) from exc
 
@@ -399,6 +399,11 @@ def rank_resumes_by_similarity(
     logger.info("[SemanticMatcher] Ranking %d resumes using '%s'", len(resume_texts), model_name)
     model  = _get_model(model_name)
     jd_emb = embed_job_description(job_description, model_name)
+
+    # ADDED: Early return for empty input — avoids unnecessary model warmup
+    if not resume_texts:
+        logger.warning("[SemanticMatcher] No resume texts provided — returning empty.")
+        return []
 
     filenames    = []
     full_chunks  = []
