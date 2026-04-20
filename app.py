@@ -762,14 +762,19 @@ def _run_screening_pipeline(
                 # Arctic is asymmetric: required skills are the "query" side, candidate
                 # skills are the "document" side. Without the query prefix, both land in
                 # document space and soft-skill cosines inflate to ~0.80+ for everything.
-                _skill_req_kwargs = dict(
-                    convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False,
-                )
                 if model_name == ARCTIC_MODEL:
-                    _skill_req_kwargs["prompt_name"] = "query"
+                    prefix = "Represent this sentence for searching relevant passages: "
+                    req_skills_encoded = [prefix + s for s in required_skills]
+                else:
+                    req_skills_encoded = required_skills
 
                 # Encode required skills once; batch-encode all unique candidate skills
-                req_skill_embs = _skill_model.encode(required_skills, **_skill_req_kwargs)
+                req_skill_embs = _skill_model.encode(
+                    req_skills_encoded,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
                 unique_skills = list(dict.fromkeys(
                     skill
                     for info in extracted.values()
@@ -1322,11 +1327,11 @@ def handle_413(e):
 def get_stats():
     """Return aggregate screening statistics from metrics_log.jsonl."""
     try:
-        load_all_runs = getattr(metrics_store, "load_all_runs", None)
-        if not callable(load_all_runs):
+        try:
+            runs = metrics_store.load_all_runs()
+        except AttributeError:
             return jsonify({"error": "metrics_store.load_all_runs not available"}), 501
 
-        runs = load_all_runs()
         if not runs:
             return jsonify({
                 "total_runs": 0,

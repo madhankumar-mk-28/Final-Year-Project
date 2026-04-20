@@ -469,12 +469,12 @@ def embed_job_description(jd: str, model_name: str = DEFAULT_MODEL) -> np.ndarra
     chunks   = _chunk_text(jd_clean)
 
     # Asymmetric models (Arctic) require a query prompt prefix on the JD side
-    is_query_model = model_name in _QUERY_PROMPT_MODELS
-    encode_kwargs  = dict(convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=True)
-    if is_query_model:
-        encode_kwargs["prompt_name"] = "query"
+    if model_name in _QUERY_PROMPT_MODELS:
+        # Prepend explicitly to prevent kwargs errors on older sentence-transformers versions
+        prefix = "Represent this sentence for searching relevant passages: "
+        chunks = [prefix + c for c in chunks]
         logger.debug(
-            "[SemanticMatcher] Arctic asymmetric mode — encoding JD (%d chunk(s)) with query prefix.",
+            "[SemanticMatcher] Arctic asymmetric mode — encoding JD (%d chunk(s)) with explicit query prefix.",
             len(chunks),
         )
     else:
@@ -483,7 +483,12 @@ def embed_job_description(jd: str, model_name: str = DEFAULT_MODEL) -> np.ndarra
         )
 
     try:
-        chunk_embs = model.encode(chunks, **encode_kwargs)
+        chunk_embs = model.encode(
+            chunks,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
     except Exception as exc:
         logger.error("[SemanticMatcher] JD encoding failed: %s", exc)
         raise RuntimeError(f"Job description encoding error: {exc}") from exc
