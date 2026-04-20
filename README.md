@@ -413,7 +413,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-Built with 🤖 transformers, ☕ late nights, and way too many PDF resumes
+Built with Claude, late night grinding sessions, and way too many tokens as fee😭
 
 **23BCS0163 · Madhan Kumar · VIT Vellore · April 2026**
 
