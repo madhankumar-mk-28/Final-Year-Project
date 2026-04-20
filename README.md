@@ -1,38 +1,27 @@
-<h1 align="center">
-  <br>
-  <img src="https://img.icons8.com/?size=160&id=114844&format=png&color=4F46E5" alt="Resume Screener" width="130">
-  <br>
-  <b>ML-Based Resume Screening System</b>
-  <br>
-  <sub><sup>AI-powered candidate ranking using transformer embeddings</sup></sub>
-  <br>
-</h1>
+<div align="center">
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white" />
-  <img src="https://img.shields.io/badge/Flask-3.x-000000?style=flat-square&logo=flask&logoColor=white" />
-  <img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black" />
-  <img src="https://img.shields.io/badge/SBERT-Transformers-FF6B35?style=flat-square&logo=huggingface&logoColor=white" />
-  <img src="https://img.shields.io/badge/License-MIT-22C55E?style=flat-square" />
-</p>
+# 🔍 ML - Based Resume Screening System
 
-<p align="center">
-  <img src="https://img.shields.io/badge/MPNet-768d-7C3AED?style=flat-square" />
-  <img src="https://img.shields.io/badge/MxBai-1024d%20·%20MTEB%20%231-EC4899?style=flat-square" />
-  <img src="https://img.shields.io/badge/Arctic%20Embed-768d-0EA5E9?style=flat-square" />
-</p>
+### ML - powered candidate ranking using transformer embeddings
 
-<p align="center">
-  <b>Built by <a href="https://github.com/madhankumar-mk-28">23BCS0163 — Madhan Kumar</a> · VIT Vellore · B.Sc. Computer Science · 2026</b>
-</p>
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Flask](https://img.shields.io/badge/Flask-3.x-000000?style=flat-square&logo=flask&logoColor=white)](https://flask.palletsprojects.com)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
+[![HuggingFace](https://img.shields.io/badge/SBERT-Transformers-FF6B35?style=flat-square&logo=huggingface&logoColor=white)](https://huggingface.co)
+[![License](https://img.shields.io/badge/License-MIT-22C55E?style=flat-square)](LICENSE)
+
+[![MPNet](https://img.shields.io/badge/MPNet-768d-7C3AED?style=flat-square)](https://huggingface.co/sentence-transformers/multi-qa-mpnet-base-dot-v1)
+[![MxBai](https://img.shields.io/badge/MxBai-1024d%20%C2%B7%20MTEB%20%231-EC4899?style=flat-square)](https://huggingface.co/mixedbread-ai/mxbai-embed-large-v1)
+[![Arctic](https://img.shields.io/badge/Arctic%20Embed-768d-0EA5E9?style=flat-square)](https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v1.5)
+
+**Built by [23BCS0163 — Madhan Kumar](https://github.com/madhankumar-mk-28) · VIT Vellore · B.Sc. Computer Science · 2026**
 
 ---
 
-<p align="center">
-  Stop keyword-matching. Start <i>understanding</i> resumes.
-  <br>
-  Transformer embeddings + configurable weighted scoring + a fully offline React dashboard.
-</p>
+*Stop keyword-matching. Start **understanding** resumes.*
+Transformer embeddings + configurable weighted scoring + a fully offline React dashboard.
+
+</div>
 
 ---
 
@@ -46,17 +35,17 @@ No cloud APIs. No data leaves your machine. Fully offline after first model down
 
 ---
 
-## 🖥️ Dashboard Preview
+## 🖥️ Dashboard Views
 
-> The React dashboard across all five views:
+> Five dedicated views cover the full recruitment workflow:
 
-| Upload & Configure | Processing | Ranked Candidates |
-|:------------------:|:----------:|:-----------------:|
-| Drag-drop PDFs, paste JD, set weights | Live 6-step pipeline progress | Medal-ranked table with score rings |
-
-| Analytics | Decisions |
-|:---------:|:---------:|
-| Score distribution, talent quadrant, skill gaps | Interview Now / Secondary Review / Archive |
+| View | What You Get |
+|:-----|:-------------|
+| **Upload & Configure** | Drag-drop PDFs, paste JD, tag required skills, set skill/semantic weights |
+| **Processing** | Live 6-step pipeline progress with per-stage status |
+| **Candidates** | Medal-ranked table with circular score rings, filterable by status |
+| **Analytics** | Score distribution · Talent quadrant · Skill gap analysis · Model eval metrics |
+| **Decisions** | Interview Now / Secondary Review / Archive · Rejection log with root cause |
 
 ---
 
@@ -64,9 +53,9 @@ No cloud APIs. No data leaves your machine. Fully offline after first model down
 
 ```
 PDF Resumes ──► PDF Parser ──► Information Extractor ──► Semantic Matcher ──► Scoring Engine ──► Ranked Output
-                pdfplumber     regex + 235-skill DB       SBERT embeddings     weighted formula    React dashboard
-                + PyMuPDF      name·email·phone            two-pass strategy   dynamic threshold   + CSV export
-                  fallback      skills·exp·education        40% full / 60% key  skill + semantic
+                pdfplumber     regex + 200+ skill DB       SBERT embeddings     weighted formula    React dashboard
+                + PyMuPDF      name·email·phone             two-pass strategy   dynamic threshold   + CSV export
+                  fallback      skills·exp·education         40% full / 60% key  skill + semantic
 ```
 
 ### Two-Pass Semantic Scoring
@@ -74,43 +63,46 @@ PDF Resumes ──► PDF Parser ──► Information Extractor ──► Seman
 Rather than embedding the full resume as a single vector (which dilutes key sections with boilerplate like *Declaration* and *Hobbies*), the system uses a two-pass strategy:
 
 | Pass | Weight | What's Embedded |
-|------|--------|-----------------|
+|:-----|:------:|:----------------|
 | Full document | **40%** | All text, chunked into 300-word windows with 50-word stride |
 | Key sections only | **60%** | Skills · Experience · Projects · Summary · Certifications |
 
-Chunks are pooled using **mean-max blending** (50% each) before cosine similarity is computed against the job description embedding.
+Chunks are pooled using **mean-max blending** (50% each) before cosine similarity is computed against the job description embedding. The job description embedding is **cached per request** — repeated screenings with the same JD skip re-encoding entirely.
 
 ### Weighted Scoring Formula
 
 ```
 Final Score = (skill_weight × skill_score) + (semantic_weight × semantic_score)
 
-Default:  55% skill  +  45% semantic   (adjustable via slider)
+Default:  55% skill  +  45% semantic   (adjustable per session via slider)
 ```
 
 ### Dynamic Shortlisting Threshold
 
-No fixed cutoffs. The threshold is computed live from the **60th percentile of eligible candidates' final scores**, clamped within ±10pp of the per-model default:
+No fixed cutoffs. The threshold is computed live from the **60th percentile of the batch's final scores**, clamped within ±10 pp of the per-model default:
 
 | Model | Default Threshold | Clamp Range |
-|-------|:-----------------:|:-----------:|
-| MPNet | 0.45 | [0.35 – 0.55] |
-| MxBai | 0.55 | [0.45 – 0.65] |
-| Arctic Embed | 0.50 | [0.40 – 0.60] |
+|:------|:-----------------:|:-----------:|
+| MPNet | 0.45 | \[0.35 – 0.55\] |
+| MxBai | 0.55 | \[0.45 – 0.65\] |
+| Arctic Embed | 0.50 | \[0.40 – 0.60\] |
 
 ---
 
 ## 🤖 Embedding Models
 
-Three interchangeable models — switch from the topbar at any time:
+Three interchangeable models — switch from the topbar dropdown at any time:
 
 <table>
+<thead>
 <tr>
   <th>Model</th>
-  <th>Dimensions</th>
+  <th align="center">Dimensions</th>
   <th>Best For</th>
-  <th>Disk Size</th>
+  <th align="center">Disk Size</th>
 </tr>
+</thead>
+<tbody>
 <tr>
   <td><b>MPNet</b><br><sub>multi-qa-mpnet-base-dot-v1</sub></td>
   <td align="center">768</td>
@@ -129,24 +121,25 @@ Three interchangeable models — switch from the topbar at any time:
   <td>Large applicant pools (100+ resumes) · tightest score distributions · precision retrieval</td>
   <td align="center">~430 MB</td>
 </tr>
+</tbody>
 </table>
 
-All models run **fully offline** after their initial download from HuggingFace.
+All models run **fully offline** after their initial download from HuggingFace. Up to **2 models** are held in an LRU cache simultaneously — the least-recently-used model is evicted to stay within the ~2 GB memory budget.
 
 ---
 
 ## ⚡ Key Features
 
-- 📄 **Dual-library PDF parsing** — pdfplumber primary, PyMuPDF automatic fallback
-- 🔍 **5-tier skill matching** — exact → alias → substring → token overlap → semantic
-- 🧬 **235-entry skill database** — programming, ML/AI, cloud, DevOps, databases, soft skills
-- 🔁 **Duplicate detection** — email-keyed merge with skill union + max experience
-- ⚠️ **Negation detection** — "no experience in Python" → skill excluded, not penalised
-- 📊 **Skill gap analysis** — matched / missing / semantically-matched / negated per candidate
-- 🔄 **False-negative recovery** — flags borderline rejections with high semantic alignment
-- 💾 **Session persistence** — job configs saved, auto-filled next session
-- 📤 **CSV export** — shortlisted candidates with rank, name, email, phone
-- 🔒 **Security** — SHA-256 dedup, 10 MB file cap, 500k char limit, per-IP rate limiting
+- 📄 **Dual-library PDF parsing** — pdfplumber primary, PyMuPDF automatic fallback for complex/rotated PDFs
+- 🔍 **5-tier skill matching** — exact → alias → word-boundary regex → token overlap → semantic embedding
+- 🧬 **200+ skill database** — programming languages, ML/AI, cloud, DevOps, databases, soft skills, ITSM
+- 🔁 **Duplicate candidate detection** — email-keyed merge with skill union and max-experience selection
+- 📊 **Skill gap analysis** — matched vs. missing skills per candidate with semantic fallback matching
+- 🔄 **False-negative recovery** — flags borderline rejections where semantic alignment remains high (> 0.55)
+- 🛡️ **Overload protection** — concurrent screening cap (3 slots) + per-IP rate limiting (10 req / 60s)
+- 💾 **Session persistence** — job configs saved to `config.json`, auto-filled on next upload
+- 📤 **CSV export** — shortlisted candidates with rank, name, email, phone; decision-group exports from Analytics
+- 🔒 **Security hardened** — SHA-256 dedup, PDF magic-byte validation, 10 MB cap, 500k char limit
 
 ---
 
@@ -155,27 +148,29 @@ All models run **fully offline** after their initial download from HuggingFace.
 ```
 Resume_screening_system/
 │
-├── app.py                    # Flask API — orchestration & REST endpoints
-├── resume_parser.py          # PDF extraction — pdfplumber + PyMuPDF fallback
-├── information_extractor.py  # Regex pipeline — name, email, phone, skills, exp, edu
-├── semantic_matcher.py       # SBERT embeddings — two-pass chunking + LRU cache
-├── scoring_engine.py         # Weighted scoring — dynamic threshold + band assignment
-├── audit_logger.py           # Thread-safe append-only audit log (JSONL)
+├── app.py                    # Flask API — session management, orchestration, REST endpoints
+├── resume_parser.py          # PDF extraction — pdfplumber primary, PyMuPDF fallback
+├── information_extractor.py  # Regex pipeline — name, email, phone, skills, exp, education
+├── semantic_matcher.py       # SBERT embeddings — two-pass chunking, LRU model cache, JD cache
+├── scoring_engine.py         # Weighted scoring — dynamic threshold, band assignment, FN recovery
+├── audit_logger.py           # Thread-safe append-only JSONL audit log + skill normalisation
 ├── metrics_store.py          # Per-run metrics snapshots + CLI analysis tool
-├── cleanup_cache.py          # Post-session cache & file cleanup utility
+├── cleanup_cache.py          # Post-session cache & upload file cleanup utility
 │
 ├── requirements.txt
-├── README.md
+├── config.json               # Saved job description, required skills, scoring weights
+├── audit.jsonl               # Append-only screening run log (auto-rotated at 500 entries)
+├── metrics_log.jsonl         # Detailed per-run metrics with candidate rankings
 │
-├── uploads/                  # Staged PDFs (SHA-256 deduplicated)
-├── results/                  # Scored JSON output per session
+├── uploads/                  # Staged PDFs — isolated per session under uploads/<session_id>/
+├── results/                  # Scored JSON output — one file per session
 │
-└── resume_ui/
-    └── frontend/
-        ├── src/
-        │   ├── App.jsx       # React SPA — all five dashboard views
-        │   └── index.css
-        └── package.json
+└── frontend/                 # Vite + React SPA
+    ├── index.html
+    ├── package.json
+    └── src/
+        ├── App.jsx           # Monolithic React SPA — all five dashboard views (~1400 lines)
+        └── main.jsx          # React 19 entry point
 ```
 
 ---
@@ -211,6 +206,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> **Note:** `requirements.txt` pins a CPU-only PyTorch build to save ~1.5 GB on disk. If you have a CUDA GPU, remove the `--extra-index-url` line and install the CUDA wheel manually.
+
 ### 3 · Download Embedding Models
 
 Run this once — all subsequent screening runs are fully offline:
@@ -218,11 +215,11 @@ Run this once — all subsequent screening runs are fully offline:
 ```bash
 python -c "
 from sentence_transformers import SentenceTransformer
-print('Downloading MPNet...')
+print('Downloading MPNet (~420 MB)...')
 SentenceTransformer('multi-qa-mpnet-base-dot-v1')
-print('Downloading MxBai...')
+print('Downloading MxBai (~1.3 GB)...')
 SentenceTransformer('mixedbread-ai/mxbai-embed-large-v1')
-print('Downloading Arctic Embed...')
+print('Downloading Arctic Embed (~430 MB)...')
 SentenceTransformer('Snowflake/snowflake-arctic-embed-m-v1.5')
 print('All models ready.')
 "
@@ -240,7 +237,7 @@ python app.py
 Open a second terminal:
 
 ```bash
-cd resume_ui/frontend
+cd frontend
 npm install
 npm run dev
 # Vite starts on http://localhost:5173
@@ -248,92 +245,118 @@ npm run dev
 
 ### 6 · Open the Dashboard
 
-Navigate to **[http://localhost:5173](http://localhost:5173)** — the sidebar status pill turns **Pipeline Ready** within five seconds.
+Navigate to **[http://localhost:5173](http://localhost:5173)** — the sidebar status pill turns **Pipeline Ready** within five seconds once the Flask backend responds to `/api/health`.
 
 ---
 
 ## 📋 Usage
 
-1. **Upload** — drag and drop PDF resumes onto the drop zone
-2. **Configure** — paste your job description, add required skills as tags
-3. **Tune** — adjust the skill / semantic weight slider and experience floor
-4. **Select model** — choose MPNet, MxBai, or Arctic from the topbar
-5. **Run** — click **Run Screening** and watch the 6-step pipeline execute
-6. **Review** — explore the ranked table, click candidates for skill gap detail
-7. **Export** — download shortlisted candidates as CSV
+1. **Upload** — drag and drop PDF resumes onto the drop zone (max 100 files, 10 MB each)
+2. **Configure** — paste your job description (minimum 20 characters), add required skills as tags
+3. **Tune** — adjust the skill / semantic weight slider and minimum experience floor
+4. **Select model** — choose MPNet, MxBai, or Arctic from the topbar dropdown
+5. **Run** — click **Run Screening** and watch the 6-step pipeline execute live
+6. **Review** — explore the ranked candidate table, click any row for the skill radar and profile drawer
+7. **Export** — download shortlisted candidates as CSV from the Candidates view, or export by decision group from Analytics → Decisions
 
 > [!TIP]
-> For general roles, start with **MPNet** at the default **55% / 45%** split.
+> For general roles, start with **MPNet** at the default **55% skill / 45% semantic** split.
 > For highly technical roles, increase skill weight to **65–70%**.
-> For large pools (100+ resumes), switch to **Arctic Embed**.
+> For large pools (100+ resumes), **Arctic Embed** produces the tightest score distributions.
 
 ---
 
 ## 📊 Analytics Views
 
-The **Analytics** tab has five sections:
+The **Analytics** tab has five sections accessible from the segmented tab bar:
 
 | Tab | What You See |
-|-----|-------------|
-| **Overview** | Score distribution bands · Accuracy / Precision / Recall / F1 · Confusion matrix |
-| **Funnel** | Staged recruitment pipeline · dropout counts at each stage |
-| **Talent** | 2×2 quadrant — Ideal Fit · Skilled · Role-Aware · Weak Match |
-| **Skills** | Per-skill coverage bars · Gap severity tags (RARE / SCARCE / LOW / OK) |
-| **Decisions** | Interview Now · Secondary Review · Archive · Borderline review list · Rejection log |
+|:----|:-------------|
+| **Overview** | Full score distribution bars · Accuracy / Precision / Recall / F1 · Confusion matrix · Soft classification bands |
+| **Funnel** | Staged recruitment pipeline with per-stage candidate counts and dropout totals |
+| **Talent** | 2×2 quadrant map — Ideal Fit · Skilled · Role-Aware · Weak Match |
+| **Skills** | Per-skill coverage bars · Skill gap severity tags (`RARE` / `SCARCE` / `LOW` / `OK`) · Top-3 radar comparison |
+| **Decisions** | Interview Now · Secondary Review · Archive · Full borderline list · Per-candidate rejection analysis |
+
+The **soft classification bands** (used in Overview and Decisions) use fixed thresholds:
+
+| Band | Final Score | Action |
+|:-----|:-----------:|:-------|
+| Strong Fit | ≥ 65% | Interview Now |
+| Borderline | 50–64% | Manual Review |
+| Weak Fit | < 50% | Archive |
 
 ---
 
 ## ⚙️ Configuration
 
 | Parameter | Default | Range | Description |
-|-----------|:-------:|:-----:|-------------|
-| Skill weight | **0.55** | 0.0 – 1.0 | Relative importance of skill matching |
-| Semantic weight | **0.45** | 0.0 – 1.0 | Relative importance of semantic similarity |
-| Min experience | **0** years | 0 – 20 | Hard floor; 0 = freshers eligible |
-| Max file size | **10 MB** | — | Per PDF upload limit |
-| Max concurrent jobs | **3** | — | HTTP 503 returned on overflow |
-| Rate limit | **30 req / 60s** | — | Per-IP; HTTP 429 on breach |
+|:----------|:-------:|:-----:|:------------|
+| `skill_weight` | **0.55** | 0.0 – 1.0 | Relative importance of skill matching in final score |
+| `semantic_weight` | **0.45** | 0.0 – 1.0 | Relative importance of semantic similarity in final score |
+| `min_experience_years` | **0** | 0 – 20 | Hard experience floor; 0 = freshers eligible |
+| `top_n` | **100** | 1 – ∞ | Maximum candidates returned in results |
+| Max file size | **10 MB** | — | Per-PDF upload limit (`MAX_FILE_BYTES`) |
+| Max files per session | **200** | — | Per-upload batch limit |
+| Max concurrent screenings | **3** | — | Returns HTTP 503 when exceeded |
+| Rate limit | **10 req / 60s** | — | Per-IP sliding window; returns HTTP 429 on breach |
+| Min free disk | **200 MB** | — | Upload rejected if free disk falls below this |
 
 ---
 
 ## 📈 Performance
 
+Benchmarks measured on real batches from the audit log (wall-clock time, CPU only):
+
 | Batch Size | Hardware | Model | Time |
-|:----------:|----------|-------|:----:|
-| 20 resumes | Apple M4 (no GPU) | MPNet | ~8s |
-| 20 resumes | Intel i5 (no GPU) | MPNet | ~55s |
-| 100 resumes | Apple M4 (no GPU) | MPNet | ~25s |
-| 100 resumes | Apple M4 (no GPU) | MxBai | ~45s |
+|:----------:|:---------|:------|:----:|
+| 20 resumes | Apple M1 (MPS) | MPNet | ~10s |
+| 34 resumes | Apple M1 (MPS) | MPNet | ~11s |
+| 66 resumes | Apple M1 (MPS) | MPNet | ~19–28s |
+| 66 resumes | Apple M1 (MPS) | Arctic Embed | ~24s |
+
+> Batch encoding (all chunks in two `model.encode()` calls per run) is the primary reason throughput stays this high — per-resume encoding would be 10–20× slower.
 
 ---
 
 ## 🔒 Security Notes
 
-- All uploaded PDFs are **SHA-256 hashed** before storage — identical files are silently deduplicated
-- Magic-bytes validation confirms every upload is a genuine PDF regardless of file extension
-- Extracted text is **capped at 500,000 characters per file during page extraction** (not after) — this is the actual decompression-bomb defence
-- No candidate PII is transmitted externally — all processing is local
+- All uploaded PDFs are **SHA-256 hashed** before storage — identical files within a session are silently deduplicated
+- **PDF magic-byte validation** (`%PDF` header check) rejects non-PDF files regardless of extension
+- Extracted text is **capped at 500,000 characters** — the decompression-bomb defence is applied page-by-page during extraction, not after
+- **Session isolation** — each upload creates an independent directory under `uploads/<session_id>/`; no shared file state between users
+- **Session ID validation** — all `session_id` values are validated against a strict 32-character hex regex before any file I/O
+- No candidate PII is transmitted externally — all processing is local and fully offline after model download
 
 ---
 
 ## 🛠️ Metrics & Audit CLI
 
-Every screening run is logged. Analyse past runs from the terminal:
+Every screening run writes to two JSONL logs. Both are automatically trimmed to the 500 most recent records.
 
 ```bash
-# View the most recent run in full
+# View summary of all past runs
+python metrics_store.py
+
+# Full detail for the most recent run (scores, rankings, confusion matrix)
 python metrics_store.py --run latest
 
-# Export all runs to CSV
+# Full detail for a specific run by ID
+python metrics_store.py --run 2026-04-05T03:19:44.791563+00:00
+
+# Cross-run model comparison and Spearman correlations
+python metrics_store.py --compare
+
+# Export all runs to a flat CSV (one row per candidate per run)
 python metrics_store.py --export csv
 
-# Clear all stored metrics
+# Delete all stored metrics
 python metrics_store.py --clear
 
-# Clean Python cache and session files
+# Clean Python cache + uploaded PDFs + session results
 python cleanup_cache.py
 
-# Clean cache only (keep uploaded PDFs and results)
+# Clean Python cache only (keep uploads and results)
 python cleanup_cache.py --keep-pdfs
 ```
 
@@ -341,10 +364,8 @@ python cleanup_cache.py --keep-pdfs
 
 ## 📚 Academic References
 
-This project builds on the following key works:
-
 | # | Authors | Year | Title |
-|---|---------|:----:|-------|
+|:--|:--------|:----:|:------|
 | 1 | Devlin et al. | 2019 | BERT: Pre-training of Deep Bidirectional Transformers — *NAACL* |
 | 2 | Reimers & Gurevych | 2019 | Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks — *EMNLP* |
 | 3 | Wang et al. | 2020 | MiniLM: Deep Self-Attention Distillation — *NeurIPS* |
@@ -357,22 +378,28 @@ This project builds on the following key works:
 
 ## 🗺️ Roadmap
 
-- [x] PDF parsing with dual-library fallback
-- [x] 235-entry curated skill database
-- [x] Three interchangeable SBERT embedding models
-- [x] Two-pass semantic scoring (40% full / 60% key sections)
-- [x] Dynamic threshold (60th percentile of eligible candidates)
-- [x] Configurable skill / semantic weight slider
-- [x] Skill gap analysis (matched / missing / semantic / negated)
-- [x] Duplicate candidate detection and merging
-- [x] Negation context detection
-- [x] False-negative recovery flagging
-- [x] React analytics dashboard (5 views)
-- [x] Audit logging + metrics store CLI
-- [x] CSV export of shortlisted candidates
-- [ ] OCR support for scanned PDFs (Tesseract)
+**Completed**
+- [x] PDF parsing with dual-library fallback (pdfplumber + PyMuPDF)
+- [x] 200+ entry curated skill database with 150+ alias mappings
+- [x] Three interchangeable SBERT embedding models (MPNet · MxBai · Arctic)
+- [x] Two-pass semantic scoring (40% full text / 60% key sections)
+- [x] Dynamic shortlisting threshold (60th percentile, per-model clamped)
+- [x] Configurable skill / semantic weight slider per session
+- [x] Skill gap analysis — matched vs. missing skills per candidate
+- [x] Duplicate candidate detection and merging (email-keyed)
+- [x] False-negative recovery flagging (low score but high semantic)
+- [x] Per-IP rate limiting + concurrent screening cap + disk space guard
+- [x] Session isolation with SHA-256 dedup and magic-byte PDF validation
+- [x] React 19 analytics dashboard — 5 views, 4 analytics sub-tabs
+- [x] Confusion matrix + Accuracy / Precision / Recall / F1 in Analytics
+- [x] Audit logging (`audit.jsonl`) + metrics store CLI (`metrics_store.py`)
+- [x] CSV export — shortlisted candidates + per-decision-group exports
+- [x] Background cleanup worker with hourly stale-session eviction
+
+**Planned**
+- [ ] OCR support for scanned PDFs (Tesseract integration)
 - [ ] Live skill taxonomy integration (EMSI Burning Glass)
-- [ ] Multi-recruiter authentication + session isolation
+- [ ] Multi-recruiter authentication + role-based session isolation
 - [ ] Interview scheduling API integration
 - [ ] Fine-tuned domain-specific HR embedding model
 
@@ -384,8 +411,11 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-<p align="center">
-  Built with 🤖 transformers, ☕ late nights, and way too many PDF resumes<br>
-  <b>23BCS0163 · Madhan Kumar · VIT Vellore · April 2026</b><br>
-  <sub>Under the guidance of Dr. Suba Shanthini S · SCORE · School of Computer Science Engineering and Information Systems</sub>
-</p>
+<div align="center">
+
+Built with 🤖 transformers, ☕ late nights, and way too many PDF resumes
+
+**23BCS0163 · Madhan Kumar · VIT Vellore · April 2026**
+
+
+</div>
