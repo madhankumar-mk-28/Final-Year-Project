@@ -1,8 +1,19 @@
-"""cleanup_cache.py — Post-screening cleanup utility.
+"""
+cleanup_cache.py — Post-screening cleanup utility.
+
+Removes temporary files generated during screening sessions:
+    1. Python cache files (__pycache__ directories and .pyc files)
+    2. Uploaded PDF resumes from uploads/<session_id>/ directories
+    3. JSON result files from results/ directory
 
 Usage:
-    python cleanup_cache.py              cleans Python cache + uploads + results
-    python cleanup_cache.py --keep-pdfs  cleans Python cache only
+    python cleanup_cache.py              — Clean everything (cache + uploads + results)
+    python cleanup_cache.py --keep-pdfs  — Clean Python cache only (keep uploads and results)
+
+This is a standalone script — safe to run at any time, even while the server
+is running (it won't delete files that are currently being processed).
+
+Runs fully offline. No network calls. OS-independent.
 """
 
 import os
@@ -12,21 +23,28 @@ from pathlib import Path
 
 
 def cleanup_python_cache(root_dir: str = ".") -> tuple[int, int]:
-    """Recursively remove all __pycache__ directories and .pyc files under root_dir.
+    """Recursively remove all __pycache__ directories and .pyc files.
 
-    Returns (dirs_removed, files_removed).
+    Walks the directory tree starting from root_dir and removes:
+        - __pycache__/ directories (and all contents)
+        - Individual .pyc files found anywhere in the tree
+
+    Returns:
+        Tuple of (directories_removed, files_removed).
     """
     removed_dirs  = 0
     removed_files = 0
 
     for dirpath, dirnames, filenames in os.walk(root_dir, topdown=True):
+        # Remove __pycache__ directories
         if "__pycache__" in dirnames:
             cache_path = os.path.join(dirpath, "__pycache__")
             shutil.rmtree(cache_path, ignore_errors=True)
             print(f"  [cache dir]  {cache_path}")
             removed_dirs += 1
-            dirnames.remove("__pycache__")
+            dirnames.remove("__pycache__")     # Don't descend into removed dir
 
+        # Remove individual .pyc files
         for filename in filenames:
             if filename.endswith(".pyc"):
                 file_path = os.path.join(dirpath, filename)
@@ -41,15 +59,21 @@ def cleanup_python_cache(root_dir: str = ".") -> tuple[int, int]:
 
 
 def cleanup_uploads(uploads_dir: str = "uploads") -> int:
-    """Delete all PDFs from uploads/<session_id>/ and remove the now-empty session directories.
+    """Delete all PDF files from uploads/<session_id>/ directories.
 
-    Returns the number of PDF files removed.
+    Also removes any empty session directories after PDF deletion.
+    Non-empty directories (e.g. with non-PDF files) are left intact.
+
+    Returns:
+        Number of PDF files removed.
     """
     uploads_path = Path(uploads_dir)
     if not uploads_path.is_dir():
         return 0
 
     removed = 0
+
+    # Delete all PDF files recursively
     for pdf_path in uploads_path.rglob("*.pdf"):
         try:
             pdf_path.unlink()
@@ -58,22 +82,24 @@ def cleanup_uploads(uploads_dir: str = "uploads") -> int:
         except OSError as e:
             print(f"  [error]       Could not remove {pdf_path}: {e}")
 
+    # Remove empty session directories
     for entry in uploads_path.iterdir():
         if not entry.is_dir():
-            continue   # skip stray files (e.g. .DS_Store) inside uploads/
+            continue                               # Skip stray files (e.g. .DS_Store)
         try:
-            entry.rmdir()   # only succeeds when the directory is already empty
+            entry.rmdir()                          # Only succeeds when directory is empty
             print(f"  [session dir] removed empty {entry}")
         except OSError:
-            pass   # non-empty session — leave it
+            pass                                   # Non-empty session — leave it
 
     return removed
 
 
 def cleanup_results(results_dir: str = "results") -> int:
-    """Delete all JSON result files from results/.
+    """Delete all JSON result files from the results/ directory.
 
-    Returns the number of files removed.
+    Returns:
+        Number of result files removed.
     """
     results_path = Path(results_dir)
     if not results_path.is_dir():
@@ -92,15 +118,22 @@ def cleanup_results(results_dir: str = "results") -> int:
 
 
 def run_cleanup(keep_pdfs: bool = False, root_dir: str = ".") -> None:
-    """Run the full cleanup sequence: Python cache → uploads → results."""
+    """Run the full cleanup sequence: Python cache → uploads → results.
+
+    Args:
+        keep_pdfs: If True, skip upload and result cleanup (cache-only mode).
+        root_dir:  Root directory to scan for Python cache files.
+    """
     print("=" * 52)
     print("  ML Resume Screening — Post-Session Cleanup")
     print("=" * 52)
 
+    # Step 1: Always clean Python cache files
     print("\n→ Scanning for Python cache files…")
     dirs_removed, files_removed = cleanup_python_cache(root_dir)
     print(f"  Removed {dirs_removed} __pycache__ folder(s), {files_removed} .pyc file(s).")
 
+    # Step 2: Optionally clean uploads and results
     if not keep_pdfs:
         print("\n→ Clearing uploaded resumes from uploads/…")
         pdfs_removed = cleanup_uploads(os.path.join(root_dir, "uploads"))

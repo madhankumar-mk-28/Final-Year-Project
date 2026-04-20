@@ -1,3 +1,36 @@
+"""
+scoring_engine.py — Weighted scoring, eligibility checks, and candidate ranking.
+
+This module takes extracted candidate data and semantic similarity scores,
+then produces a ranked list of candidates with eligibility decisions,
+band classifications, and structured rejection codes.
+
+Three-Pass Pipeline:
+    Pass 1: Compute component scores (skill, semantic, experience) + hard eligibility
+    Pass 2: Compute dynamic threshold from eligible candidates' scores (60th percentile)
+    Pass 3: Apply threshold, assign bands (Strong Fit / Borderline / Weak Fit),
+            run false-negative recovery, sort by final score
+
+Scoring Formula:
+    final_score = (skill_weight × skill_score) + (semantic_weight × semantic_score)
+                  + (exp_weight × exp_score)
+    Default weights: 55% skill / 45% semantic / 0% experience
+
+Key Features:
+    - 41-entry skill alias dictionary for synonym matching
+    - 5-level skill matching hierarchy (exact → alias → reverse-alias → substring → token overlap)
+    - Negation context detection ("no SQL experience" won't count SQL as matched)
+    - Per-model sigmoid calibration normalises raw cosine scores to [0, 1]
+    - False-negative recovery flags high-semantic candidates below threshold
+    - Structured rejection codes for machine-readable frontend decisions
+
+Public API:
+    score_candidates(candidates, required_skills, config, model_key) → list[dict]
+    ScoringConfig — dataclass holding scoring weights and constraints
+
+Runs fully offline. No network calls. OS-independent.
+"""
+
 from __future__ import annotations
 import logging
 import math
@@ -8,20 +41,43 @@ from typing import Optional, Set, Tuple, List
 
 logger = logging.getLogger("scoring_engine")
 
-# Structured rejection codes — frontend switches on these, never parses the human-readable reason string
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  REJECTION CODES — machine-readable codes for the frontend              ║
+# ║  The frontend switches on these enum strings, never on human messages.  ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 REJECTION_CODES = {
-    "no_contact":           "no_contact",
-    "skill_below_min":      "skill_below_min",
-    "experience_below_min": "experience_below_min",
-    "missing_education":    "missing_education",
-    "score_below_threshold":"score_below_threshold",
-    "score_below_min":      "score_below_min",
+    "no_contact":           "no_contact",            # No email or phone found
+    "skill_below_min":      "skill_below_min",       # Skill match < 30% minimum
+    "all_skills_negated":   "all_skills_negated",    # Every required skill found in negation context
+    "experience_below_min": "experience_below_min",  # Experience below configured minimum
+    "missing_education":    "missing_education",     # Required education not found
+    "score_below_threshold":"score_below_threshold", # Final score below dynamic threshold
+    "score_below_min":      "score_below_min",       # Final score below configured minimum
 }
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  SCORING CONFIGURATION                                                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 @dataclass
 class ScoringConfig:
-    """Holds scoring weights and eligibility constraints for a screening run."""
+    """Holds scoring weights and eligibility constraints for a screening run.
+
+    Weights are automatically normalised to sum to 1.0 on construction.
+    If all weights are zero, defaults to 55/45/0 (skill/semantic/experience).
+
+    Attributes:
+        skill_weight:         Weight for exact + alias skill matching (default 0.55)
+        semantic_weight:      Weight for transformer embedding similarity (default 0.45)
+        exp_weight:           Weight for experience score (default 0.0)
+        min_experience_years: Minimum years of experience required (0 = no minimum)
+        required_education:   List of required degree keywords (empty = no requirement)
+        top_n:                Maximum number of candidates to return (default 100)
+        min_final_score:      Absolute minimum final score cutoff (default 0.0)
+    """
     skill_weight:          float = 0.55
     semantic_weight:       float = 0.45
     exp_weight:            float = 0.0
@@ -31,15 +87,22 @@ class ScoringConfig:
     min_final_score:       float = 0.0
 
     def __post_init__(self):
+        """Validate and normalise weights after construction."""
+        # Clamp negative weights to zero
         self.skill_weight    = max(0.0, self.skill_weight)
         self.semantic_weight = max(0.0, self.semantic_weight)
         self.exp_weight      = max(0.0, self.exp_weight)
+
         total = self.skill_weight + self.semantic_weight + self.exp_weight
+
+        # If all weights are zero, reset to safe defaults
         if total == 0:
             self.skill_weight    = 0.55
             self.semantic_weight = 0.45
             self.exp_weight      = 0.0
             return
+
+        # If weights don't sum to 1.0, normalise them proportionally
         if abs(total - 1.0) > 0.01:
             logger.warning(
                 "[ScoringConfig] Weights %.4f/%.4f/%.4f don't sum to 1.0 (total=%.4f) — normalizing.",
@@ -50,7 +113,15 @@ class ScoringConfig:
             self.exp_weight      = self.exp_weight      / total
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  SKILL ALIAS DICTIONARY — 41 alias groups                              ║
+# ║  Maps a canonical skill name to all its recognised synonyms/variants.   ║
+# ║  Used by _is_skill_match to credit candidates who list equivalent       ║
+# ║  terms (e.g. "sklearn" satisfies a "machine learning" requirement).     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 SKILL_ALIASES = {
+    # ── Technical skills ─────────────────────────────────────────────────
     "machine learning":     ["ml", "machine learning", "sklearn", "scikit-learn", "xgboost", "lightgbm"],
     "deep learning":        ["deep learning", "neural network", "neural networks", "dl"],
     "nlp":                  ["nlp", "natural language processing", "text mining", "nltk", "spacy",
@@ -76,12 +147,9 @@ SKILL_ALIASES = {
     "stored procedures":    ["stored procedures", "stored procedure", "pl/sql", "t-sql", "tsql",
                              "database programming", "sql server"],
 
-    # ── Soft skills — broad synonym coverage ─────────────────────────────────
-    # The aliases below intentionally overlap so that a candidate who lists any
-    # ONE of: communication / teamwork / collaboration / problem solving  gets
-    # credit for the related required-skills group.  The scoring engine de-dupes
-    # so no double-counting occurs.
-
+    # ── Soft skills — broad synonym coverage ─────────────────────────────
+    # Intentionally overlapping so listing ANY one synonym gives credit
+    # for the related skill group. The scoring engine de-dupes matches.
     "problem solving":      ["problem solving", "problem-solving", "troubleshooting", "debugging",
                              "root cause analysis", "analytical thinking", "critical thinking",
                              "issue resolution", "solutioning"],
@@ -95,9 +163,6 @@ SKILL_ALIASES = {
                              "cross-functional", "cooperative", "group work"],
     "collaboration":        ["collaboration", "team player", "teamwork", "team work",
                              "cooperative", "cross-functional", "group work"],
-    # communication covers both verbal and written — a candidate who lists
-    # "communication" satisfies verbal communication AND written communication
-    # requirements because it is the parent/superset concept.
     "communication":        ["communication", "verbal communication", "written communication",
                              "interpersonal skills", "presentation", "public speaking"],
     "verbal communication": ["verbal communication", "communication", "interpersonal skills",
@@ -115,12 +180,14 @@ SKILL_ALIASES = {
                              "precision", "accuracy"],
     "presentation":         ["presentation", "public speaking", "verbal communication",
                              "communication"],
-    # ── Database skills ───────────────────────────────────────────────────────
+
+    # ── Database skills ──────────────────────────────────────────────────
     "database management":  ["database management", "database design", "dbms", "rdbms", "nosql",
                              "sql", "mysql", "postgresql", "mongodb", "oracle", "sqlite"],
     "database design":      ["database design", "schema design", "normalization", "data modeling",
                              "database management"],
-    # ── Tech skills ───────────────────────────────────────────────────────────
+
+    # ── Additional tech skills ───────────────────────────────────────────
     "bootstrap":            ["bootstrap", "css framework"],
     "c":                    ["c programming", "c language"],
     "java":                 ["java", "j2ee", "jvm", "maven", "gradle"],
@@ -129,32 +196,46 @@ SKILL_ALIASES = {
     "nodejs":               ["nodejs", "node", "node.js", "npm"],
 }
 
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  MODEL-SPECIFIC CONSTANTS                                              ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 # Per-model eligibility threshold defaults.
 # The dynamic threshold (60th percentile) is clamped within ±10% of these values
-# to prevent extreme score distributions from pushing the cutoff out of range.
+# to prevent extreme score distributions from pushing the cutoff wildly.
 MODEL_THRESHOLDS = {
-    "mpnet":  0.45,
-    "mxbai":  0.55,
-    "arctic": 0.50,
+    "mpnet":  0.45,    # MPNet: balanced scoring, moderate cosine range
+    "mxbai":  0.55,    # MxBai: higher absolute scores → higher base threshold
+    "arctic": 0.50,    # Arctic: compressed cosine range → middle default
+}
+
+# Per-model semantic floors for false-negative recovery.
+# Candidates below the dynamic threshold but above this floor are flagged for review.
+# MxBai's floor is raised because it produces inflated cosine scores.
+FN_RECOVERY_SEMANTIC_FLOOR = {
+    "mpnet":  0.52,    # MPNet: standard floor
+    "mxbai":  0.62,    # MxBai: raised to prevent excessive false alerts
+    "arctic": 0.55,    # Arctic: standard floor
 }
 
 # Sigmoid calibration maps each model's raw cosine similarity range onto [0, 1].
-# Different models output similarity in different numeric ranges:
-#   MPNet  → ~0.30 – 0.65
-#   MxBai  → ~0.35 – 0.70
-#   Arctic → ~0.15 – 0.40  (smaller because it uses asymmetric retrieval training)
-# Min-max normalisation across a single batch inflates noise when all candidates
-# score within 0.03 of each other.  Sigmoid with a per-model center preserves
-# ranking order while placing scores on a shared probabilistic scale.
-# scale=8 gives ~90% of the [0,1] range within ±0.15 of center — sufficient
-# discrimination without clipping legitimate outliers.
+# Each model outputs cosine similarity in a different numeric range:
+#   MPNet  → ~0.30–0.65 | MxBai → ~0.35–0.70 | Arctic → ~0.15–0.40
+# The sigmoid with scale=8 gives ~90% of the [0,1] range within ±0.15 of center.
 SEM_CALIBRATION = {
     "mpnet":  {"center": 0.45, "scale": 8.0},
     "mxbai":  {"center": 0.50, "scale": 8.0},
     "arctic": {"center": 0.32, "scale": 8.0},
 }
 
-# Matches negation phrases directly before a skill mention ("no experience in X", "not skilled in X")
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  NEGATION DETECTION                                                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+# Matches negation phrases in a window before a skill mention
+# Examples: "no experience in SQL", "not skilled in Python", "lacking Java knowledge"
 _NEGATION_PATTERNS = re.compile(
     r"\b(no|not|without|lack(?:ing)?|never|zero|minimal|limited)\s+"
     r"(?:experience|knowledge|familiarity|skills?|proficiency|background)?\s*"
@@ -162,19 +243,16 @@ _NEGATION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Characters before a skill mention to search for negation phrasing.
+# Number of characters before a skill mention to search for negation phrasing
 _NEGATION_WINDOW = 80
 
 # Module-level compiled-regex cache for skill boundary patterns.
-# _is_skill_match builds r"\b<skill>\b" patterns on the fly; without caching
-# Python recompiles the same pattern for every candidate × every required skill
-# ({cands} × {req_skills} × {aliases} iterations per screening run).
-# With a dict cache each unique skill string compiles its pattern exactly once.
+# Prevents recompiling the same r"\bskill\b" pattern for every candidate × every skill.
 _regex_cache: dict[str, re.Pattern] = {}
 
 
 def _skill_re(term: str) -> re.Pattern:
-    """Return a compiled word-boundary regex for term, building it on first use."""
+    """Return a compiled word-boundary regex for a skill term (cached after first build)."""
     pat = _regex_cache.get(term)
     if pat is None:
         pat = re.compile(r"\b" + re.escape(term) + r"\b")
@@ -183,7 +261,19 @@ def _skill_re(term: str) -> re.Pattern:
 
 
 def _has_negation_context(resume_text_lower: str, skill_term: str) -> bool:
-    """Return True if the skill appears in a negation context (e.g. 'no SQL experience')."""
+    """Check if a skill appears in a negation context in the resume text.
+
+    Scans an 80-character window before each occurrence of the skill term,
+    looking for negation phrases like "no", "not", "without", "lacking".
+
+    Examples that return True:
+        "I have no experience in Python"
+        "Not skilled in SQL or database management"
+        "Lacking knowledge of machine learning"
+
+    Returns:
+        True if any occurrence of the skill is preceded by a negation phrase.
+    """
     for m in re.finditer(re.escape(skill_term), resume_text_lower):
         start = max(0, m.start() - _NEGATION_WINDOW)
         context = resume_text_lower[start:m.start()]
@@ -193,95 +283,143 @@ def _has_negation_context(resume_text_lower: str, skill_term: str) -> bool:
 
 
 def _sigmoid_calibrate(raw: float, model_key: str) -> float:
-    """Map a raw cosine similarity score onto [0, 1] via per-model sigmoid.
+    """Map a raw cosine similarity score onto [0, 1] using per-model sigmoid.
 
-    Rationale: raw cosine ranges differ per model (Arctic ~0.15–0.40, MPNet ~0.30–0.65).
-    Sigmoid centering on the model's expected neutral-match score maps the natural similarity
-    distribution onto a stable [0, 1] interval without amplifying noise in tight batches.
+    Different embedding models produce cosine scores in different numeric ranges.
+    This function normalises them to a common [0, 1] scale using a sigmoid curve
+    centered on each model's expected neutral-match score.
+
+    Without this calibration, Arctic scores (~0.15–0.40) would appear much lower
+    than MPNet scores (~0.30–0.65) even for equally good matches.
+
+    Args:
+        raw:       Raw cosine similarity score from the embedding model.
+        model_key: Model identifier ("mpnet", "mxbai", or "arctic").
+
+    Returns:
+        Calibrated score in [0, 1], rounded to 6 decimal places.
     """
     p   = SEM_CALIBRATION.get(model_key, {"center": 0.45, "scale": 8.0})
     val = 1.0 / (1.0 + math.exp(-p["scale"] * (raw - p["center"])))
     return round(val, 6)
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  DYNAMIC THRESHOLD                                                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 def get_dynamic_threshold(final_scores: list, model_key: str = "mpnet") -> float:
-    """Compute the 60th-percentile score as the eligibility threshold, clamped to model default ±10%."""
+    """Compute the 60th-percentile eligibility threshold from eligible candidates' scores.
+
+    The threshold adapts to each batch:
+        - Strong candidate pool → threshold rises (more selective)
+        - Weak candidate pool → threshold falls (more permissive)
+        - Very small batch (< 5 candidates) → falls back to model default
+
+    The result is clamped within ±10% of the model default to prevent instability.
+
+    Args:
+        final_scores: List of final scores from eligible candidates only.
+        model_key:    Model identifier for looking up the default threshold.
+
+    Returns:
+        Dynamic threshold value (float), clamped to model default ±10%.
+    """
     model_default = MODEL_THRESHOLDS.get(model_key, 0.50)
+
+    # Small batches: 60th percentile is unreliable, use model default instead
     if len(final_scores) < 5:
         return model_default
+
+    # Compute 60th percentile using sorted-list indexing
     sorted_scores = sorted(final_scores)
     n = len(sorted_scores)
-    p60_idx = min(max(int(n * 0.60) - 1, 0), n - 1)
-    p60 = sorted_scores[p60_idx]  # 60th percentile cutoff
+    p60_idx = min(max(int(n * 0.60) - 1, 0), n - 1)   # 0-indexed position
+    p60 = sorted_scores[p60_idx]
+
+    # Clamp to model default ±10% to prevent extreme threshold values
     return round(max(model_default - 0.10, min(model_default + 0.10, p60)), 4)
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  SKILL MATCHING ENGINE                                                  ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 def _normalise_skill_text(skill: str) -> str:
-    """Lowercase and strip non-alphanumeric characters from a skill string for comparison."""
+    """Lowercase and strip non-alphanumeric characters from a skill string.
+
+    Keeps: letters, digits, +, #, ., -, spaces (for skills like "C++", "C#", "ASP.NET").
+    Collapses multiple spaces. Used for consistent comparison across different formats.
+    """
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+#.\- ]+", " ", skill.lower())).strip()
 
 
 def _tokenise_skill(skill: str) -> set:
-    """Split a normalised skill string into individual word tokens."""
+    """Split a normalised skill string into individual word tokens for overlap matching."""
     return {tok for tok in _normalise_skill_text(skill).split(" ") if tok}
 
 
 def _is_skill_match(req_lower: str, candidate_lower: set) -> bool:
-    """Return True if req_lower matches any candidate skill via exact, alias, substring, or token overlap.
+    """Check if a required skill matches any candidate skill using a 5-level hierarchy.
 
-    Match hierarchy (first hit wins):
-      1. Exact normalised match.
-      2. Required-skill alias exact match against candidate skills.
-      3. Reverse-alias: check if ANY alias of EACH candidate skill covers the required skill.
-         This handles the case where candidate lists "communication" and required is
-         "verbal communication" — "communication" is an alias of "verbal communication".
-      4. Word-boundary substring match (both directions).
-      5. Token overlap ≥ 2/3 of required-skill tokens.
-    Patterns are retrieved from _regex_cache and compiled at most once per unique term.
+    Match hierarchy (first hit wins — ordered from fastest to most expensive):
+        1. Exact normalised match: "python" == "python"
+        2. Alias exact match: required "machine learning" → alias "sklearn" in candidate set
+        3. Reverse-alias: candidate has "communication" → alias covers "verbal communication"
+        4. Word-boundary substring: "react" found within "react native" (both directions)
+        5. Token overlap: ≥ 2/3 of required-skill tokens found in candidate skill
+
+    Args:
+        req_lower:      Normalised required skill string.
+        candidate_lower: Set of normalised candidate skill strings.
+
+    Returns:
+        True if the required skill is matched by any candidate skill.
     """
+    # Level 1: Exact normalised match (fastest — O(1) set lookup)
     if req_lower in candidate_lower:
         return True
 
+    # Build alias lists for the required skill
     req_aliases     = SKILL_ALIASES.get(req_lower, [req_lower])
     req_alias_norms = [_normalise_skill_text(a) for a in req_aliases]
 
-    # ── Check 2: required-skill aliases against candidate skill set ────────────
+    # Level 2: Required-skill aliases vs candidate skill set
     if candidate_lower.intersection(req_alias_norms):
         return True
 
-    # ── Check 3: reverse-alias lookup ─────────────────────────────────────────
-    # For each candidate skill, get ITS alias list and check whether req_lower
-    # (or any of req's aliases) is covered by that alias list.
+    # Level 3: Reverse-alias lookup — for each candidate skill, check if its
+    # alias group covers the required skill. Handles cases like candidate
+    # listing "communication" satisfying a "verbal communication" requirement.
     for cand in candidate_lower:
         cand_aliases     = SKILL_ALIASES.get(cand, [cand])
         cand_alias_norms = {_normalise_skill_text(a) for a in cand_aliases}
-        # Does any required-skill alias appear in the candidate's alias set?
         if cand_alias_norms.intersection(req_alias_norms):
             return True
-        # Does the required skill itself appear in the candidate's alias list?
         if req_lower in cand_alias_norms:
             return True
 
     req_tokens = _tokenise_skill(req_lower)
 
     for cand in candidate_lower:
-        # ── Check 4: Word-boundary substring match (both directions) ──────────
+        # Level 4: Word-boundary substring match (both directions)
+        # "react" found within "react native", or "data analysis" within "data analytics"
         if len(req_lower) >= 4:
             if _skill_re(req_lower).search(cand):
                 return True
             if len(cand) >= 4 and _skill_re(cand).search(req_lower):
                 return True
 
-        # ── Check 5: Token overlap ≥ 2/3 of required-skill tokens ─────────────
+        # Level 5: Token overlap — at least 2/3 of required tokens present
         cand_tokens = _tokenise_skill(cand)
         if req_tokens and len(req_tokens) > 1:
             if len(req_tokens & cand_tokens) / len(req_tokens) >= 0.67:
                 return True
 
-        # Same substring + token checks for each required-skill alias
+        # Run levels 4-5 for each alias of the required skill too
         for alias_norm in req_alias_norms:
             if alias_norm == req_lower:
-                continue  # already checked above
+                continue                           # Already checked above
             if len(alias_norm) >= 4:
                 if _skill_re(alias_norm).search(cand):
                     return True
@@ -301,55 +439,94 @@ def _skill_score(
     semantic_matches: Optional[Set] = None,
     resume_text: str = "",
 ) -> Tuple:
-    """Match required skills against candidate skills via exact/alias → semantic → negation; return 5-tuple."""
-    if not required_skills:
-        return 1.0, [], [], [], []
+    """Score a candidate's skills against the required skills list.
 
-    candidate_lower = {_normalise_skill_text(s) for s in candidate_skills if s}  # FIX: guard against None
+    Processing order for each required skill:
+        1. Check for negation context ("no experience in X") → negated, excluded
+        2. Check exact/alias match against candidate's extracted skills → matched
+        3. Check semantic embedding match → matched (flagged as semantic_only)
+        4. No match found → missing
+
+    The skill score is: matched_count / (total_required - negated_count).
+    If ALL required skills are negated, score is 0.0 (not 1.0).
+
+    Returns:
+        6-tuple: (score, matched, missing, semantic_only, negated, all_negated)
+    """
+    # No required skills configured → all candidates get 1.0 skill score
+    if not required_skills:
+        return 1.0, [], [], [], [], False
+
+    # Normalise candidate skills for comparison (guard against None entries)
+    candidate_lower = {_normalise_skill_text(s) for s in candidate_skills if s}
     sem_matched_norm = (
         {_normalise_skill_text(s) for s in semantic_matches} if semantic_matches else set()
     )
     resume_lower = resume_text.lower()
 
-    matched        = []  # exact or alias match, not negated
-    missing        = []  # no match found
-    semantic_only  = []  # matched only via semantic embedding (shown as ~ in UI)
-    negated        = []  # found but explicitly negated in the resume text
+    matched        = []   # Skills found via exact/alias match (not negated)
+    missing        = []   # Skills not matched by any method
+    semantic_only  = []   # Skills matched ONLY via semantic embedding (shown as ~ in UI)
+    negated        = []   # Skills found but in negation context (excluded from scoring)
 
     for req in required_skills:
         req_lower = _normalise_skill_text(req)
 
-        if resume_lower and _has_negation_context(resume_lower, req_lower):  # negation checked first
+        # Step 1: Check negation context first (highest priority)
+        if resume_lower and _has_negation_context(resume_lower, req_lower):
             negated.append(req)
             continue
 
+        # Step 2: Check exact/alias/substring/token match
         if _is_skill_match(req_lower, candidate_lower):
             matched.append(req)
+        # Step 3: Check semantic embedding match (transformer-based)
         elif req_lower in sem_matched_norm:
             matched.append(req)
             semantic_only.append(req)
+        # Step 4: No match found
         else:
             missing.append(req)
 
-    effective_total = len(required_skills) - len(negated)  # negated skills excluded from denominator
-    score = len(matched) / effective_total if effective_total > 0 else 1.0
-    return round(score, 4), matched, missing, semantic_only, negated
+    # Calculate score: negated skills excluded from both numerator AND denominator
+    effective_total = len(required_skills) - len(negated)
+    all_negated = effective_total <= 0 and len(negated) > 0  # Every skill was negated
+    score = len(matched) / effective_total if effective_total > 0 else 0.0
 
+    return round(score, 4), matched, missing, semantic_only, negated, all_negated
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  HARD ELIGIBILITY CHECKS                                               ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def _check_hard_eligibility(info: dict, config: ScoringConfig) -> Tuple[bool, str, str]:
-    """Apply hard disqualification rules: no contact info, insufficient experience, missing education."""
+    """Apply hard disqualification rules that reject a candidate regardless of score.
+
+    Checks (in order):
+        1. Contact info: must have at least email OR phone
+        2. Experience: must meet minimum years (if configured)
+        3. Education: must match at least one required degree keyword (if configured)
+
+    Returns:
+        3-tuple: (eligible: bool, reason: str, rejection_code: str)
+        If eligible, reason and code are empty strings.
+    """
+    # Check 1: Candidate must have at least one contact method
     email = (info.get("email") or "").strip()
     phone = (info.get("phone") or "").strip()
     if not email and not phone:
         return False, "No contact details found", "no_contact"
 
+    # Check 2: Minimum experience requirement (if configured)
     exp = info.get("experience_years", 0.0)
     if config.min_experience_years > 0 and exp < config.min_experience_years:
         return False, f"Experience {exp}y < required {config.min_experience_years}y", "experience_below_min"
 
+    # Check 3: Required education keywords (if configured)
     if config.required_education:
         edu_raw  = " ".join(info.get("education", [])).lower()
-        edu_norm = re.sub(r"[^a-z0-9\s]", "", edu_raw)
+        edu_norm = re.sub(r"[^a-z0-9\s]", "", edu_raw)   # Normalise for comparison
         def _norm_req(r):
             return re.sub(r"[^a-z0-9\s]", "", r.lower())
         if not any(_norm_req(req) in edu_norm for req in config.required_education):
@@ -359,8 +536,15 @@ def _check_hard_eligibility(info: dict, config: ScoringConfig) -> Tuple[bool, st
 
 
 def is_eligible(info: dict, config: ScoringConfig,
-                skill_score: Optional[float] = None) -> tuple:  # pyright: ignore
-    """Thin compatibility wrapper around _check_hard_eligibility for external callers."""
+                skill_score: Optional[float] = None) -> tuple:
+    """Public compatibility wrapper for hard eligibility checks.
+
+    Combines _check_hard_eligibility with a skill score minimum (30%).
+    Used by external callers that need a simple eligible/not-eligible answer.
+
+    Returns:
+        2-tuple: (eligible: bool, reason: str)
+    """
     eligible, reason, _ = _check_hard_eligibility(info, config)
     if not eligible:
         return False, reason
@@ -369,27 +553,52 @@ def is_eligible(info: dict, config: ScoringConfig,
     return True, ""
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  MAIN SCORING PIPELINE                                                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 def score_candidates(candidates: list, required_skills: list,
                      config: ScoringConfig, model_key: str = "mpnet") -> list:
-    """Score all candidates in three passes: component scores → dynamic threshold → eligibility + bands."""
+    """Score all candidates in three passes and return ranked results.
+
+    Pass 1 — Component Scores:
+        Compute skill_score, semantic_score, exp_score for each candidate.
+        Apply hard eligibility checks (contact, experience, education).
+        Check for all-skills-negated edge case.
+
+    Pass 2 — Dynamic Threshold:
+        Compute the 60th-percentile threshold from ELIGIBLE candidates only.
+        Rejected candidates' near-zero scores are excluded to prevent deflation.
+
+    Pass 3 — Band Assignment + FN Recovery:
+        Compare each candidate's final_score against the dynamic threshold.
+        Assign band labels: Strong Fit, Borderline, or Weak Fit.
+        Flag false-negative recovery candidates (high semantic, low final).
+
+    Args:
+        candidates:      List of candidate dicts with info, semantic_score, etc.
+        required_skills: List of required skill strings from the JD.
+        config:          ScoringConfig with weights and constraints.
+        model_key:       Embedding model identifier (for calibration/thresholds).
+
+    Returns:
+        List of scored candidate dicts, sorted by (eligible, final_score) descending.
+    """
     logger.info(
         "[scoring_engine] Scoring %d candidates | weights: skill=%.2f semantic=%.2f exp=%.2f",
         len(candidates), config.skill_weight, config.semantic_weight, config.exp_weight,
     )
 
-    # ── Pre-pass: Sigmoid-calibrate semantic scores per model ─────────────────
-    # OOM-fallback candidates (zero vectors from _safe_encode retry exhaustion) are
-    # forced to semantic_score=0.0 and excluded from calibration to avoid artificially
-    # boosting them via the sigmoid curve.
-    # All other candidates are mapped through _sigmoid_calibrate which normalises the
-    # model-specific cosine range onto [0,1] without amplifying noise in tight batches.
+    # ── Pre-pass: Sigmoid-calibrate semantic scores ──────────────────────
+    # OOM-fallback candidates (zero vectors) are forced to 0.0 to prevent
+    # the sigmoid curve from artificially boosting them above zero.
     calibrated_sems: dict[str, float] = {}
     raw_values = []
     for c in candidates:
         fname   = c.get("filename", "")
-        raw_sem = float(min(max(c.get("semantic_score", 0.0), 0.0), 1.0))
+        raw_sem = float(min(max(c.get("semantic_score", 0.0), 0.0), 1.0))  # Clamp to [0, 1]
         if c.get("oom_fallback", False):
-            calibrated_sems[fname] = 0.0
+            calibrated_sems[fname] = 0.0               # Force zero for OOM fallback
             logger.warning("[scoring_engine] OOM fallback for %s — semantic_score forced to 0.0", fname)
         else:
             calibrated_sems[fname] = _sigmoid_calibrate(raw_sem, model_key)
@@ -401,46 +610,54 @@ def score_candidates(candidates: list, required_skills: list,
             model_key, min(raw_values), max(raw_values),
         )
 
-    # ── Pass 1: Component scores and hard eligibility ─────────────────────────
+    # ── Pass 1: Component scores and hard eligibility checks ─────────────
     raw_results = []
 
     for c in candidates:
         info                   = c.get("info", {})
         filename               = c.get("filename", "")
         semantic_score         = calibrated_sems.get(filename, 0.0)
-        resume_text            = c.get("resume_text", "")     # for negation detection
+        resume_text            = c.get("resume_text", "")
         semantic_skill_matches = c.get("semantic_skill_matches", None)
 
-        skill_score, matched_skills, missing_skills, semantic_only, negated_skills = _skill_score(
+        # Compute skill match score with negation detection
+        skill_score, matched_skills, missing_skills, semantic_only, negated_skills, all_negated = _skill_score(
             info.get("skills", []),
             required_skills,
             semantic_skill_matches,
             resume_text=resume_text,
         )
 
+        # Apply hard eligibility checks (contact, experience, education)
         hard_ok, hard_reason, hard_code = _check_hard_eligibility(info, config)
-        if hard_ok and skill_score < 0.30 and required_skills:  # 30% skill floor is a hard minimum
-            hard_ok     = False
-            hard_reason = f"Skill match {round(skill_score * 100)}% < minimum 30% required"
-            hard_code   = "skill_below_min"
 
+        # Additional skill-based rejection (only if hard checks passed)
+        if hard_ok and required_skills:
+            if all_negated:
+                # Every required skill was found in a negation context
+                hard_ok     = False
+                hard_reason = "Every required skill was found in a negation context (e.g. 'no experience in X')"
+                hard_code   = "all_skills_negated"
+            elif skill_score < 0.30:
+                # Below 30% skill match minimum
+                hard_ok     = False
+                hard_reason = f"Skill match {round(skill_score * 100)}% < minimum 30% required"
+                hard_code   = "skill_below_min"
+
+        # Compute experience score (0.0–1.0 scale)
         exp_years  = info.get("experience_years", 0.0)
-        target_exp = max(config.min_experience_years, 1.0)
-        exp_score  = min(exp_years / target_exp, 1.0)
+        target_exp = max(config.min_experience_years, 1.0)   # Avoid division by zero
+        exp_score  = min(exp_years / target_exp, 1.0)        # Cap at 1.0
 
+        # Weighted composite final score
         final_score = (
             config.skill_weight    * skill_score    +
             config.semantic_weight * semantic_score +
-            config.exp_weight      * exp_score       # weighted sum of all three components
+            config.exp_weight      * exp_score
         )
-        final_score = min(round(final_score, 4), 1.0)
+        final_score = min(round(final_score, 4), 1.0)       # Cap at 1.0
 
-        fn_recovered = False
-        if hard_ok and final_score < 0.50 and semantic_score > 0.55:  # rescue strong-semantic candidates
-            fn_recovered = True
-            logger.debug("[scoring_engine] FN Recovery: %s — low final %.2f but semantic %.2f",
-                         filename, final_score, semantic_score)
-
+        # Store results with internal fields (prefixed with _) for Pass 3
         raw_results.append({
             "filename":         filename,
             "name":             info.get("name", "Unknown"),
@@ -458,26 +675,30 @@ def score_candidates(candidates: list, required_skills: list,
             "semantic_score":   round(semantic_score, 4),
             "exp_score":        round(exp_score, 4),
             "final_score":      final_score,
-            "_hard_ok":         hard_ok,
-            "_hard_reason":     hard_reason,
-            "_hard_code":       hard_code,
-            "fn_recovered":     fn_recovered,
+            "_hard_ok":         hard_ok,          # Internal — removed in Pass 3
+            "_hard_reason":     hard_reason,      # Internal — removed in Pass 3
+            "_hard_code":       hard_code,        # Internal — removed in Pass 3
             "band":             "",
             "confidence":       0.0,
         })
 
-    # ── Pass 2: Dynamic threshold from full score distribution ────────────────
-    all_finals = [r["final_score"] for r in raw_results]
-    dyn_threshold = get_dynamic_threshold(all_finals, model_key)  # 60th percentile, clamped ±10%
-    logger.info("[scoring_engine] Dynamic threshold for '%s': %.4f", model_key, dyn_threshold)
+    # ── Pass 2: Dynamic threshold from ELIGIBLE candidates only ──────────
+    # Only eligible candidates' scores are used to prevent rejected candidates'
+    # near-zero scores from deflating the threshold artificially.
+    eligible_finals = [r["final_score"] for r in raw_results if r["_hard_ok"]]
+    dyn_threshold = get_dynamic_threshold(eligible_finals, model_key)
+    logger.info("[scoring_engine] Dynamic threshold for '%s': %.4f (from %d eligible)",
+                model_key, dyn_threshold, len(eligible_finals))
 
-    # ── Pass 3: Apply threshold, assign bands, sort ───────────────────────────
+    # ── Pass 3: Apply threshold, assign bands, run FN recovery ───────────
     results = []
     for r in raw_results:
+        # Remove internal fields — they should not appear in the output
         hard_ok     = r.pop("_hard_ok")
         hard_reason = r.pop("_hard_reason")
         hard_code   = r.pop("_hard_code")
 
+        # Determine eligibility based on hard checks + dynamic threshold
         if not hard_ok:
             eligible         = False
             rejection_reason = hard_reason
@@ -500,18 +721,18 @@ def score_candidates(candidates: list, required_skills: list,
             rejection_reason = ""
             rejection_code   = ""
 
+        # Set output fields
         r["eligible"]          = eligible
         r["rejection_reason"]  = rejection_reason
         r["rejection_code"]    = rejection_code
-        r["dynamic_threshold"] = dyn_threshold   # included on every candidate — single source of truth
+        r["dynamic_threshold"] = dyn_threshold
         r["confidence"]        = round(abs(r["final_score"] - dyn_threshold), 4)
-        r["near_threshold"]    = r["confidence"] < 0.05
+        r["near_threshold"]    = r["confidence"] < 0.05   # Within 5% of threshold
 
-        # Band and eligibility both derived from dyn_threshold — guaranteed to be consistent
-        # Band strings MUST match the frontend's checks in AnalyticsView and Decisions tab:
-        #   c.band === "Weak Fit"   → Archive group (ineligible)
-        #   c.band === "Borderline" → Secondary Review group (eligible, near threshold)
-        #   c.band === "Strong Fit" → Interview Now group (eligible, well above threshold)
+        # Assign band labels (must match frontend constants exactly)
+        #   "Weak Fit"   → Archive group (ineligible)
+        #   "Borderline" → Secondary Review group (eligible, near threshold)
+        #   "Strong Fit" → Interview Now group (eligible, well above threshold)
         if not eligible:
             r["band"] = "Weak Fit"
         elif r["final_score"] >= dyn_threshold + 0.10:
@@ -519,20 +740,36 @@ def score_candidates(candidates: list, required_skills: list,
         else:
             r["band"] = "Borderline"
 
+        # False-negative recovery: flag ineligible candidates with high semantic scores
+        # These candidates may be worth manual review despite failing the score threshold
+        sem_floor = FN_RECOVERY_SEMANTIC_FLOOR.get(model_key.lower(), 0.55)
+        if (not eligible
+                and r["final_score"] < dyn_threshold
+                and r["semantic_score"] > sem_floor):
+            r["fn_recovered"] = True
+            logger.debug("[scoring_engine] FN Recovery: %s — final %.2f < thresh %.2f but sem %.2f > floor %.2f",
+                         r["filename"], r["final_score"], dyn_threshold, r["semantic_score"], sem_floor)
+        else:
+            r["fn_recovered"] = False
+
         logger.debug(
-            "[scoring_engine] %s | skill=%.2f sem=%.2f exp=%.2f → final=%.2f | thresh=%.2f | %s",
+            "[scoring_engine] %s | skill=%.2f sem=%.2f exp=%.2f → final=%.2f | thresh=%.2f | %s%s",
             r["filename"], r["skill_score"], r["semantic_score"], r["exp_score"],
             r["final_score"], dyn_threshold, "eligible" if eligible else rejection_reason,
+            " [FN_RECOVERED]" if r.get("fn_recovered") else "",
         )
         results.append(r)
 
+    # Sort: eligible candidates first, then by final_score descending
+    # Ties broken by semantic_score, then name (alphabetical) for determinism
     results.sort(key=lambda x: (
         x["eligible"],
         x["final_score"],
         x["semantic_score"],
         x["name"],
-    ), reverse=True)   # stable deterministic ranking
+    ), reverse=True)
 
+    # Apply top_n limit if configured
     if config.top_n and config.top_n > 0:
         results = results[:config.top_n]
 

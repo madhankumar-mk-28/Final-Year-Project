@@ -1,8 +1,36 @@
 """
-app.py — Flask backend for the AI Resume Screening System.
-Endpoints: /api/health, /api/upload-resumes, /api/screen, /api/result/<id>, /api/config, /api/model, /api/clear,
-           /api/stats, /api/result/<task_id>/export, /api/validate-jd
+app.py — Flask backend for the ML-Based Resume Screening System.
+
+This is the central server that the React frontend communicates with.
+It orchestrates the four-stage ML pipeline:
+    1. PDF parsing      (resume_parser.py)
+    2. Info extraction   (information_extractor.py)
+    3. Semantic matching (semantic_matcher.py)
+    4. Scoring & ranking (scoring_engine.py)
+
+REST API Endpoints:
+    POST /api/upload-resumes    — Upload PDF resumes (returns session_id)
+    POST /api/screen            — Start async screening (returns task_id)
+    GET  /api/result/<task_id>  — Poll for screening results
+    GET  /api/result/<id>/export— Download results as CSV
+    GET  /api/health            — Health check + live metrics
+    GET  /api/config            — Read current configuration
+    POST /api/config            — Update configuration
+    POST /api/model             — Switch embedding model
+    POST /api/clear             — Delete session uploads and results
+    GET  /api/stats             — Aggregate historical screening statistics
+    POST /api/validate-jd       — Score job description quality
+
+Architecture:
+    - Async screening via ThreadPoolExecutor (max 3 concurrent)
+    - In-memory task store with 1-hour TTL and 60-entry cap
+    - Per-IP rate limiting (30 req/min sliding window)
+    - Hourly background cleanup of stale sessions and task entries
+    - Atomic file writes (temp → rename) for crash safety
+    - SHA-256 deduplication of uploaded PDFs
+
 Run: python app.py  →  http://localhost:5001
+Runs fully offline after initial model download. OS-independent.
 """
 from __future__ import annotations
 
@@ -541,7 +569,7 @@ def serialize_results(results: list, skills_configured: bool = True) -> list:
             "dynamic_threshold": r.get("dynamic_threshold", 0.5),
             "fn_recovered":      r.get("fn_recovered", False),
             "skills_configured": skills_configured,
-            "links":            {k: (v or "") for k, v in r.get("links", {"linkedin": "", "github": "", "portfolio": ""}).items()},
+            "links":            {k: (v or "") for k, v in (r.get("links") or {"linkedin": "", "github": "", "portfolio": ""}).items()},
         })
     return serialized
 
@@ -583,6 +611,14 @@ def _merge_candidate_profiles(profile_a: dict, profile_b: dict) -> dict:
             seen.add(k)
             edu.append(entry)
     merged["education"] = edu
+
+    # Merge profile links — keep the non-empty URL from either profile
+    links_a = profile_a.get("links") or {"linkedin": "", "github": "", "portfolio": ""}
+    links_b = profile_b.get("links") or {"linkedin": "", "github": "", "portfolio": ""}
+    merged["links"] = {
+        key: (links_a.get(key) or links_b.get(key) or "")
+        for key in ("linkedin", "github", "portfolio")
+    }
     return merged
 
 

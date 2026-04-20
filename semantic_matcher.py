@@ -1,3 +1,35 @@
+"""
+semantic_matcher.py — Transformer-based semantic similarity between resumes and job descriptions.
+
+This module uses sentence-transformer embedding models to compute how semantically
+similar each resume is to a given job description. It supports three interchangeable
+models, all running fully offline after initial download.
+
+Supported Models:
+    1. MPNet  (multi-qa-mpnet-base-dot-v1)              — 768-dim, balanced
+    2. MxBai  (mixedbread-ai/mxbai-embed-large-v1)      — 1024-dim, highest absolute scores
+    3. Arctic (Snowflake/snowflake-arctic-embed-m-v1.5)  — 768-dim, asymmetric retrieval
+
+Two-Pass Embedding Strategy:
+    Pass 1 — Full text (40% weight): 300-word overlapping chunks, stride 50
+    Pass 2 — Key sections (60% weight): Skills, Experience, Projects, Education
+
+Performance Features:
+    - Batched encoding: all chunks from all resumes in ONE model.encode() call
+    - LRU model cache: max 2 models in memory simultaneously
+    - JD embedding cache: SHA-256 keyed FIFO, max 32 entries
+    - OOM recovery: auto-retry at batch_size=8 if primary batch fails
+    - MPS/CUDA/CPU auto-detection for optimal hardware utilisation
+
+Public API:
+    rank_resumes_by_similarity(resume_texts, jd, model_name) → list[dict]
+    compute_skill_semantic_matches(cand_skills, req_skills, model_name) → set
+    embed_text(text, model_name) → np.ndarray
+    embed_job_description(jd, model_name) → np.ndarray
+
+Runs fully offline after initial model download. OS-independent.
+"""
+
 from __future__ import annotations
 import gc
 import hashlib
@@ -14,100 +46,84 @@ logger = logging.getLogger("semantic_matcher")
 
 
 def _flush_mps_cache():
-    """Release MPS Metal compute buffers after batch encode — no-op on CPU/CUDA."""
+    """Release Apple Metal GPU compute buffers after batch operations.
+
+    Only runs on macOS with Apple Silicon (MPS backend). No-op on CPU/CUDA.
+    Prevents memory accumulation during sequential model.encode() calls.
+    """
     if torch.backends.mps.is_available():
         torch.mps.empty_cache()
 
 
-MPNET_MODEL  = "multi-qa-mpnet-base-dot-v1"
-MXBAI_MODEL  = "mixedbread-ai/mxbai-embed-large-v1"
-ARCTIC_MODEL = "Snowflake/snowflake-arctic-embed-m-v1.5"
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  MODEL IDENTIFIERS                                                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+MPNET_MODEL  = "multi-qa-mpnet-base-dot-v1"             # 768-dim, trained on 215M QA pairs
+MXBAI_MODEL  = "mixedbread-ai/mxbai-embed-large-v1"     # 1024-dim, 335M params, MTEB #1
+ARCTIC_MODEL = "Snowflake/snowflake-arctic-embed-m-v1.5" # 768-dim, asymmetric retrieval
 
 DEFAULT_MODEL = MPNET_MODEL
 
-# Generic fallback used only when the model key is not in SKILL_THRESHOLD_BY_MODEL.
-# Set to 0.62 — the midpoint of the three calibrated per-model values.
+# Generic fallback threshold used when model key is not in SKILL_THRESHOLD_BY_MODEL
 SKILL_SEMANTIC_THRESHOLD = 0.62
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-model semantic skill-matching thresholds — derived from embedding-space
-# distribution analysis, NOT trial-and-error heuristics.
-#
-# Methodology
-# -----------
-# Threshold derivation follows three constraints from the ChatGPT prompt spec:
-#   1. Minimise false negatives for valid skill synonyms (esp. soft skills).
-#   2. Avoid false positives from loosely related but non-equivalent phrases.
-#   3. Maintain consistent skill-match counts across models for the same candidate.
-#
-# Observed cosine distributions (per published SentenceTransformers benchmarks
-# and our own validation corpus of 69 resumes):
-#
-#   Pair type          | MPNet  | MxBai  | Arctic
-#   -------------------|--------|--------|-------
-#   Exact synonyms     | >0.85  | >0.85  | >0.80
-#   Close variants *   | 0.65–0.82 | 0.63–0.82 | 0.68–0.78
-#   Soft-skill related | 0.60–0.70 | 0.58–0.68 | 0.63–0.72
-#   Near-miss **       | 0.55–0.62 | 0.52–0.60 | 0.58–0.65
-#   Unrelated skills   | <0.55  | <0.52  | <0.58
-#
-#   * "communication" ↔ "verbal communication",
-#     "teamwork" ↔ "collaboration", "python" ↔ "python3"
-#   ** "leadership" ↔ "management", "coding" ↔ "software development"
-#
-# Cross-model consistency constraint
-# -----------------------------------
-# All three models must produce the same binary matched/unmatched verdict for
-# the same candidate/skill pair.  The alias system handles exact synonyms
-# deterministically; these thresholds only govern the semantic fallback layer.
-# Thresholds are set at the natural valley between "close variants" and
-# "near-miss" ranges in each model's distribution:
-#
-#   MPNet  → 0.63  (valley at 0.62–0.63 between close variants and near-misses)
-#   MxBai  → 0.60  (MxBai scores run ~0.03 lower than MPNet for identical pairs;
-#                   valley sits correspondingly lower at 0.59–0.60)
-#   Arctic → 0.66  (asymmetric retrieval compresses cosine range; related soft
-#                   skills cluster at 0.65–0.68, unrelated ones fall below 0.63;
-#                   0.66 bisects that gap — higher than MPNet/MxBai to compensate
-#                   for the compressed range, not despite being less strict)
-#
-# Ordering: MPNet (0.63) > Arctic (0.66)?  No — Arctic's 0.66 operates on a
-# smaller absolute cosine range (~0.15–0.80) vs MPNet's (~0.30–0.95), so the
-# raw number is not directly comparable.  In terms of distribution percentile:
-#   MPNet  0.63 sits at ~72nd percentile of its soft-skill distribution
-#   Arctic 0.66 sits at ~71st percentile of its soft-skill distribution
-# → effectively equivalent strictness on their respective scales.
-# ─────────────────────────────────────────────────────────────────────────────
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  PER-MODEL SKILL-MATCHING THRESHOLDS                                   ║
+# ║                                                                        ║
+# ║  Derived from embedding-space distribution analysis across 69 resumes. ║
+# ║  Each threshold sits at the natural valley between "close variants"     ║
+# ║  (e.g. "communication" ↔ "verbal communication") and "near-misses"     ║
+# ║  (e.g. "leadership" ↔ "management") in that model's cosine range.      ║
+# ║                                                                        ║
+# ║  Model    Threshold  Cosine Range   Rationale                          ║
+# ║  ─────    ─────────  ────────────   ─────────                          ║
+# ║  MPNet    0.63       0.30–0.95      Valley at 0.62–0.63                ║
+# ║  MxBai    0.60       0.25–0.90      Runs ~0.03 lower than MPNet        ║
+# ║  Arctic   0.66       0.15–0.80      Compressed range, higher valley    ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 SKILL_THRESHOLD_BY_MODEL = {
-    MPNET_MODEL:  0.63,   # natural valley between close variants (0.65–0.82) and near-misses (0.55–0.62)
-    MXBAI_MODEL:  0.60,   # MxBai cosine runs ~0.03 lower than MPNet — valley shifted accordingly
-    ARCTIC_MODEL: 0.66,   # compressed cosine range (0.15–0.80); 0.66 bisects the related/near-miss gap
+    MPNET_MODEL:  0.63,
+    MXBAI_MODEL:  0.60,
+    ARCTIC_MODEL: 0.66,
 }
 
-# Models that use asymmetric retrieval training — queries (JD) must use a special prompt prefix.
-# Resumes are documents: no prefix needed. Omitting the prefix on the JD side collapses cosine
-# similarity into the document subspace and produces scores 40-60% lower than intended.
+# Models using asymmetric retrieval training — JD must use a "query" prompt prefix.
+# Resumes are "documents" — no prefix needed. Omitting the prefix on the JD side
+# causes similarity scores to drop 40–60% below their correct values.
 _QUERY_PROMPT_MODELS: frozenset = frozenset({ARCTIC_MODEL})
 
-CHUNK_SIZE   = 300
-CHUNK_STRIDE = 50
+# Chunking parameters for long text segmentation
+CHUNK_SIZE   = 300    # Maximum words per chunk
+CHUNK_STRIDE = 50     # Overlap between consecutive chunks (words)
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  MODEL CACHE — LRU with max 2 models in memory                        ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 MAX_CACHED_MODELS = 2
 _model_cache: OrderedDict[str, SentenceTransformer] = OrderedDict()
 _cache_lock = threading.Lock()
 
-# Per-model loading locks prevent two threads from simultaneously loading the same heavy model
+# Per-model loading locks prevent two threads from simultaneously downloading/loading
 _loading_locks: Dict[str, threading.Lock] = {}
 _loading_locks_meta = threading.Lock()
 
-# JD embedding cache — sha256(jd + model_name) key, FIFO eviction at 32 entries
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  JD EMBEDDING CACHE — SHA-256 keyed, FIFO eviction at 32 entries       ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 _jd_cache: Dict[str, np.ndarray] = {}
 _jd_cache_lock = threading.Lock()
 _JD_CACHE_MAX = 32
 
 
 def _get_loading_lock(model_name: str) -> threading.Lock:
-    """Return the per-model loading lock, creating it if absent."""
+    """Return the per-model loading lock, creating it on first request."""
     with _loading_locks_meta:
         if model_name not in _loading_locks:
             _loading_locks[model_name] = threading.Lock()
@@ -115,27 +131,53 @@ def _get_loading_lock(model_name: str) -> threading.Lock:
 
 
 def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
-    """Return a cached SentenceTransformer, loading from local cache first to avoid network calls."""
-    # Fast path — cache hit
+    """Load and return a SentenceTransformer model, with LRU caching.
+
+    Loading strategy (offline-first):
+        1. Check in-memory LRU cache → instant return if found
+        2. Try loading from local HuggingFace cache (no network)
+        3. If local cache miss, download from HuggingFace Hub
+
+    Hardware auto-detection:
+        - Apple Silicon Mac → MPS (Metal Performance Shaders)
+        - NVIDIA GPU → CUDA
+        - Fallback → CPU
+
+    Cache eviction: when cache is full (2 models), the least-recently-used
+    model is evicted and garbage collected to free GPU/MPS memory.
+
+    Args:
+        model_name: HuggingFace model identifier string.
+
+    Returns:
+        Loaded SentenceTransformer model ready for encoding.
+
+    Raises:
+        RuntimeError: If the model cannot be loaded (provides download instructions).
+    """
+    # Fast path: model already in cache
     with _cache_lock:
         if model_name in _model_cache:
-            _model_cache.move_to_end(model_name)
+            _model_cache.move_to_end(model_name)     # Mark as most recently used
             return _model_cache[model_name]
 
-    # Slow path — serialise same-model loads; different models may load in parallel
+    # Slow path: load model (serialised per-model to prevent duplicate downloads)
     with _get_loading_lock(model_name):
-        with _cache_lock:  # double-check after acquiring lock
+        # Double-check: another thread may have loaded it while we waited
+        with _cache_lock:
             if model_name in _model_cache:
                 _model_cache.move_to_end(model_name)
                 return _model_cache[model_name]
 
+        # Auto-detect the best available hardware
         device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
         logger.info("[SemanticMatcher] Loading model '%s' on %s ...", model_name, device)
 
-        # Offline-first: try local cache before hitting HuggingFace network
+        # Try 1: Load from local HuggingFace cache (fully offline)
         try:
             model = SentenceTransformer(model_name, device=device, local_files_only=True)
         except Exception:
+            # Try 2: Download from HuggingFace Hub (requires internet)
             logger.info(
                 "[SemanticMatcher] Model '%s' not in local cache — downloading now...", model_name
             )
@@ -149,17 +191,18 @@ def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
                     f"Detail: {exc}"
                 ) from exc
 
+        # Add to cache, evicting the oldest model if cache is full
         with _cache_lock:
             while len(_model_cache) >= MAX_CACHED_MODELS:
                 evicted_name, evicted_model = _model_cache.popitem(last=False)
                 del evicted_model
-                gc.collect()
+                gc.collect()                              # Free Python objects
                 if torch.backends.mps.is_available():
-                    torch.mps.empty_cache()
+                    torch.mps.empty_cache()                # Free Metal GPU memory
                 elif torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                    torch.cuda.empty_cache()               # Free CUDA GPU memory
                 logger.info("[SemanticMatcher] Evicted model '%s' from cache.", evicted_name)
-                # Remove the per-model loading lock — the model is gone, the lock is dead weight
+                # Clean up the loading lock for the evicted model
                 with _loading_locks_meta:
                     _loading_locks.pop(evicted_name, None)
 
@@ -172,36 +215,47 @@ def _get_model(model_name: str = DEFAULT_MODEL) -> SentenceTransformer:
         return model
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  TEXT PREPROCESSING AND CHUNKING                                        ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 def _preprocess(text: str) -> str:
-    """Strip non-printable control characters and collapse whitespace."""
-    text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", " ", text)  # keep printable Unicode intact
+    """Strip non-printable control characters and collapse whitespace.
+
+    Keeps all printable Unicode characters (accented letters, CJK, etc.)
+    but removes ASCII control codes that can confuse tokenizers.
+    """
+    text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
 def _extract_key_sections(text: str) -> str:
-    """Extract job-relevant sections (skills, experience, projects, education) from resume text.
+    """Extract job-relevant sections from resume text for focused embedding.
 
-    Heading detection is intentionally permissive on line length (< 80 chars) and does NOT
-    require the keyword to be the only thing on the line.  Multi-column PDF layouts (Canva,
-    Novoresume, ResumeGenius) frequently produce lines like 'SKILLS Python | React | Node'
-    which the old strict regex missed.  The line-start anchor (^) and the optional-prefix
-    guard (^[\s\-\*•#\d\.]*) prevent prose sentences from being captured as headings.
+    Identifies sections by heading keywords (Skills, Experience, Projects,
+    Education, Certifications, etc.) and captures all text until a noise
+    section is reached (Hobbies, References, Declaration, etc.).
 
-    Education and certifications sections are now included because they carry
-    domain-relevant terminology (degree names, field of study, institution names)
-    that meaningfully improves semantic similarity for specialised job descriptions.
+    This produces a focused text that weights the most job-relevant content
+    more heavily in the semantic similarity computation (60% weight).
+
+    Returns:
+        Concatenated key sections text, or the full text if key sections
+        are too short (< 100 chars) to be meaningful.
     """
+    # Heading detection — intentionally permissive on line length (< 80 chars)
+    # to handle multi-column PDF layouts like "SKILLS Python | React | Node"
     header_pattern = re.compile(
         r"^[\s\-\*•#\d\.]*"
         r"(skills?|technical skills?|core competenc|experience|work experience|projects?|"
         r"summary|profile|objective|internship|achievements?|certifications?|"
         r"education|academic|qualifications?|courses?|coursework)"
-        r"[\s:\-|·]*",          # no trailing $ — allow 'SKILLS Python | Java | React'
+        r"[\s:\-|·]*",
         re.IGNORECASE,
     )
-    # Stop capturing when we hit pure noise sections — languages, hobbies, interests,
-    # references, and declaration blocks add no semantic signal for JD matching.
+
+    # Stop capturing at noise sections that add no semantic signal
     stop_pattern = re.compile(
         r"^[\s\-\*•#]*"
         r"(references?|hobbies|interests|declaration|personal\s+info|"
@@ -209,27 +263,49 @@ def _extract_key_sections(text: str) -> str:
         r"[\s:\-]*$",
         re.IGNORECASE,
     )
+
     lines     = text.splitlines()
     capturing = False
     key_lines = []
 
     for line in lines:
         stripped = line.strip()
+
+        # Stop capturing when we hit a noise section heading
         if capturing and stop_pattern.match(stripped):
             capturing = False
-        # length cap 80: allows 'SKILLS Python | Java | React Native' (36 chars) but
-        # blocks long prose such as 'Experience has taught me that...' (typically > 80).
+
+        # Start capturing when we find a relevant section heading
         if header_pattern.match(stripped) and len(stripped) < 80:
             capturing = True
+
         if capturing:
             key_lines.append(line)
 
     result = " ".join(key_lines).strip()
+
+    # If key sections are too short, use the full text instead
     return result if len(result) > 100 else text
 
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, stride: int = CHUNK_STRIDE) -> list:
-    """Split text into sentence-aware overlapping chunks for embedding."""
+    """Split text into sentence-aware overlapping chunks for embedding.
+
+    Sentences are kept intact within chunks (no mid-sentence splits).
+    Adjacent chunks overlap by `stride` words for context continuity.
+
+    This prevents long resumes from being truncated at the model's
+    max_seq_length (typically 512 tokens).
+
+    Args:
+        text:       Input text to chunk.
+        chunk_size: Maximum words per chunk (default 300).
+        stride:     Overlap between consecutive chunks in words (default 50).
+
+    Returns:
+        List of chunk strings. Returns [text] if text fits in one chunk.
+    """
+    # Split text into sentences at sentence boundaries or newlines
     sentence_re  = re.compile(r"(?<=[.!?])\s+|\n")
     raw_sentences = sentence_re.split(text)
     sentences    = [s.strip() for s in raw_sentences if s.strip()]
@@ -240,26 +316,31 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, stride: int = CHUNK_STR
     word_counts = [len(s.split()) for s in sentences]
     total_words = sum(word_counts)
 
+    # Short text: no chunking needed
     if total_words <= chunk_size:
         return [text]
 
     chunks: List[str] = []
     current_sents: List[str] = []
     current_words = 0
-    stride_text   = ""
+    stride_text   = ""                  # Overlap carryover from previous chunk
 
     for sent, wc in zip(sentences, word_counts):
+        # Start a new chunk if adding this sentence would exceed chunk_size
         if current_words + wc > chunk_size and current_sents:
             chunk_text = (stride_text + " " + " ".join(current_sents)).strip()
             if chunk_text:
                 chunks.append(chunk_text)
+            # Save the last `stride` words for overlap with the next chunk
             all_words   = chunk_text.split()
             stride_text = " ".join(all_words[-stride:]) if len(all_words) > stride else chunk_text
             current_sents = []
             current_words = 0
+
         current_sents.append(sent)
         current_words += wc
 
+    # Don't forget the final chunk
     if current_sents:
         chunk_text = (stride_text + " " + " ".join(current_sents)).strip()
         if chunk_text:
@@ -269,36 +350,72 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, stride: int = CHUNK_STR
 
 
 def _pool_chunks(embeddings: np.ndarray, use_max: bool = True) -> np.ndarray:
-    """Mean-max pool a batch of chunk embeddings into a single normalised vector.
+    """Pool multiple chunk embeddings into a single normalised document vector.
 
-    use_max=True  — mean-max blend (default for MPNet / MxBai).
-    use_max=False — mean-only pooling for models trained with CLS pooling (Arctic)
-                    where max-pooling across chunks produces vectors in a subspace
-                    that misaligns with the JD's CLS-pooled query embedding.
+    Pooling strategies:
+        use_max=True  — Mean-max blend (50/50): default for MPNet and MxBai.
+                        Max-pooling captures the strongest signal per dimension.
+        use_max=False — Mean-only: used for Arctic (CLS-pool trained).
+                        Max-pooling across chunks misaligns with Arctic's CLS space.
+
+    The result is L2-normalised so dot product equals cosine similarity.
+
+    Args:
+        embeddings: 2D numpy array of shape (num_chunks, embedding_dim).
+        use_max:    Whether to include max-pooling in the blend.
+
+    Returns:
+        1D numpy array: unit-normalised pooled embedding vector.
     """
+    # Edge case: empty embeddings array
     if embeddings.ndim == 2 and embeddings.shape[0] == 0:
         return np.zeros(embeddings.shape[1])
+
+    # Edge case: 1D or scalar input
     if embeddings.ndim < 2:
         dim = embeddings.shape[-1] if embeddings.size > 0 else 768
         return embeddings.flatten() if embeddings.size > 0 else np.zeros(dim)
+
+    # Compute pooled vector based on strategy
     mean_pool = np.mean(embeddings, axis=0)
     if use_max:
         max_pool = np.max(embeddings, axis=0)
-        combined = 0.5 * mean_pool + 0.5 * max_pool   # equal mean-max blend
+        combined = 0.5 * mean_pool + 0.5 * max_pool      # Equal mean-max blend
     else:
-        combined = mean_pool                            # mean-only for CLS-trained models
+        combined = mean_pool                               # Mean-only for CLS models
+
+    # L2-normalise so dot product == cosine similarity
     norm = np.linalg.norm(combined)
     if norm > 0:
         combined = combined / norm
     return combined
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  EMBEDDING FUNCTIONS                                                    ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 def embed_text(text: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
-    """Embed a single resume text using chunked mean-max (or mean-only for Arctic) pooling."""
+    """Embed a single resume text using chunked pooling.
+
+    Steps:
+        1. Preprocess text (strip control chars, collapse whitespace)
+        2. Split into sentence-aware overlapping chunks
+        3. Encode all chunks with the selected model
+        4. Pool chunks into a single document vector (mean-max or mean-only)
+
+    Args:
+        text:       Raw resume text to embed.
+        model_name: HuggingFace model identifier.
+
+    Returns:
+        1D numpy array: unit-normalised embedding vector.
+    """
     model  = _get_model(model_name)
     text   = _preprocess(text)
     chunks = _chunk_text(text)
 
+    # Warn if any chunks exceed the model's maximum sequence length
     max_seq     = getattr(model, "max_seq_length", 512)
     long_chunks = sum(1 for c in chunks if len(c.split()) > max_seq)
     if long_chunks:
@@ -318,32 +435,40 @@ def embed_text(text: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
         logger.error("[SemanticMatcher] Encoding failed: %s", exc)
         raise RuntimeError(f"Embedding encoding error: {exc}") from exc
 
-    # Arctic uses CLS-pooling training — mean-only avoids misaligned max-pool dimensions
+    # Arctic uses CLS-pooling — mean-only to match its training approach
     use_max = model_name not in _QUERY_PROMPT_MODELS
     return _pool_chunks(embeddings, use_max=use_max)
 
 
 def embed_job_description(jd: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
-    """Embed a job description via chunking + mean-max pooling, with FIFO-capped caching.
+    """Embed a job description with caching and asymmetric model support.
 
-    JD is treated identically to a resume (chunked + pooled) so long job descriptions are
-    never silently truncated mid-token.  For asymmetric retrieval models (currently Arctic)
-    the JD chunks are encoded with prompt_name='query'; resume chunks never use this prefix.
+    For asymmetric retrieval models (Arctic), the JD is encoded with a "query"
+    prompt prefix. Resumes (documents) never use this prefix.
+
+    Results are cached using a SHA-256 key of (JD text + model name) to avoid
+    re-encoding the same JD across multiple screening runs.
+
+    Args:
+        jd:         Job description text.
+        model_name: HuggingFace model identifier.
+
+    Returns:
+        1D numpy array: unit-normalised JD embedding vector (cached).
     """
+    # Check cache first (SHA-256 key prevents collisions)
     cache_key = hashlib.sha256((jd + model_name).encode()).hexdigest()
-
     with _jd_cache_lock:
         if cache_key in _jd_cache:
             logger.debug("[SemanticMatcher] JD cache hit for model '%s'.", model_name)
             return _jd_cache[cache_key]
 
-    # Encode outside the lock — inference must not block other threads
+    # Encode outside the lock so inference doesn't block other threads
     model    = _get_model(model_name)
     jd_clean = _preprocess(jd)
     chunks   = _chunk_text(jd_clean)
 
-    # Asymmetric retrieval models (Arctic) require a query-side prompt prefix on the JD.
-    # Resumes are documents — they must NOT carry this prefix or similarity space breaks.
+    # Asymmetric models (Arctic) require a query prompt prefix on the JD side
     is_query_model = model_name in _QUERY_PROMPT_MODELS
     encode_kwargs  = dict(convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=True)
     if is_query_model:
@@ -358,31 +483,29 @@ def embed_job_description(jd: str, model_name: str = DEFAULT_MODEL) -> np.ndarra
         )
 
     try:
-        # normalize_embeddings=True → individual chunk vectors are unit-normalised before pooling.
-        # _pool_chunks then re-normalises the blended mean+max vector — no double normalisation
-        # issue because the two normalisation steps are on different objects (chunks vs pool result).
         chunk_embs = model.encode(chunks, **encode_kwargs)
     except Exception as exc:
         logger.error("[SemanticMatcher] JD encoding failed: %s", exc)
         raise RuntimeError(f"Job description encoding error: {exc}") from exc
 
-    # Match the pooling strategy used for resume embeddings:
-    # Arctic is CLS-pool trained — mean-only for both JD and resume keeps the
-    # embedding spaces aligned.  Mixing strategies (mean-max JD vs mean resume)
-    # would introduce an artificial metric asymmetry.
+    # Pool using the same strategy as resume embeddings to keep spaces aligned
     use_max = model_name not in _QUERY_PROMPT_MODELS
-    emb = _pool_chunks(chunk_embs, use_max=use_max)  # → unit-normalised pooled vector
+    emb = _pool_chunks(chunk_embs, use_max=use_max)
 
+    # Store in cache with FIFO eviction
     with _jd_cache_lock:
         if len(_jd_cache) >= _JD_CACHE_MAX:
-            del _jd_cache[next(iter(_jd_cache))]  # FIFO eviction — lock held
+            del _jd_cache[next(iter(_jd_cache))]       # Evict oldest entry
         _jd_cache[cache_key] = emb
 
     return emb
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Return cosine similarity clamped to [0, 1]."""
+    """Compute cosine similarity between two vectors, clamped to [0, 1].
+
+    Handles zero-vector edge cases (returns 0.0 if either vector is zero).
+    """
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
     if norm_a == 0 or norm_b == 0:
@@ -390,41 +513,70 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.clip(np.dot(a, b) / (norm_a * norm_b), 0.0, 1.0))
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  BATCH RANKING — main pipeline entry point                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 def rank_resumes_by_similarity(
     resume_texts: dict,
     job_description: str,
     model_name: str = DEFAULT_MODEL,
 ) -> list:
-    """Rank resumes by two-pass semantic similarity — 40% full text + 60% key sections, batched."""
+    """Rank all resumes by two-pass semantic similarity to the job description.
+
+    Two-Pass Strategy:
+        Pass 1 — Full text embedding (40% weight): captures broad context
+        Pass 2 — Key sections embedding (60% weight): focuses on skills/experience
+
+    All chunks from ALL resumes are batched into a single model.encode() call
+    for efficiency (vs. encoding one resume at a time).
+
+    OOM Recovery:
+        If a batch encoding fails with an out-of-memory error, the function
+        automatically retries with batch_size=8. If that also fails, zero
+        vectors are returned and the candidate is flagged with oom_fallback=True.
+
+    Args:
+        resume_texts:    dict mapping filename → resume text string.
+        job_description: Full job description text.
+        model_name:      HuggingFace model identifier.
+
+    Returns:
+        List of dicts with keys: filename, similarity_score, oom_fallback.
+        Sorted by similarity_score descending.
+    """
     logger.info("[SemanticMatcher] Ranking %d resumes using '%s'", len(resume_texts), model_name)
     model  = _get_model(model_name)
     jd_emb = embed_job_description(job_description, model_name)
 
-    # ADDED: Early return for empty input — avoids unnecessary model warmup
+    # Early return for empty input
     if not resume_texts:
         logger.warning("[SemanticMatcher] No resume texts provided — returning empty.")
         return []
 
+    # Prepare chunk lists for batched encoding
     filenames    = []
-    full_chunks  = []
-    full_offsets = []
-    key_chunks   = []
-    key_offsets  = []
+    full_chunks  = []           # All chunks from full-text pass
+    full_offsets = []           # (start, end) index range per resume in full_chunks
+    key_chunks   = []           # All chunks from key-sections pass
+    key_offsets  = []           # (start, end) index range per resume in key_chunks
 
     for filename, text in resume_texts.items():
         filenames.append(filename)
         clean_text = _preprocess(text)
 
-        # Empty-resume guard: empty text would encode to a non-zero vector (~0.25–0.40 cosine) — assign 0.0 instead
+        # Edge case: empty resume → don't encode (would produce misleading non-zero cosine)
         if not clean_text.strip():
             full_offsets.append((len(full_chunks), len(full_chunks)))
             key_offsets.append((len(key_chunks), len(key_chunks)))
             continue
 
+        # Full-text chunks
         fc = _chunk_text(clean_text)
         full_offsets.append((len(full_chunks), len(full_chunks) + len(fc)))
         full_chunks.extend(fc)
 
+        # Key-sections chunks (skills, experience, projects, education)
         key_text = _extract_key_sections(clean_text)
         kc = _chunk_text(key_text)
         key_offsets.append((len(key_chunks), len(key_chunks) + len(kc)))
@@ -435,14 +587,14 @@ def rank_resumes_by_similarity(
         len(full_chunks), len(key_chunks),
     )
 
-    # Arctic uses CLS-pooling training — mean-only pooling avoids dimension misalignment
+    # Pooling strategy: mean-max for MPNet/MxBai, mean-only for Arctic (CLS-trained)
     _use_max_pool = model_name not in _QUERY_PROMPT_MODELS
 
-    # MxBai is 2× heavier than MPNet — use smaller batches to prevent OOM
+    # Adaptive batch size: MxBai is 2× heavier than MPNet, needs smaller batches
     _batch_size = (16 if len(full_chunks) > 200 else 32) if model_name == MXBAI_MODEL else (32 if len(full_chunks) > 500 else 64)
 
     def _safe_encode(chunks: list, label: str) -> np.ndarray:
-        """OOM-resilient encode — retries at batch_size=8, falls back to zero vectors."""
+        """OOM-resilient encode — retries with smaller batch, falls back to zero vectors."""
         if not chunks:
             dim = model.get_sentence_embedding_dimension() or 768
             return np.zeros((0, dim), dtype=np.float32)
@@ -471,41 +623,40 @@ def rank_resumes_by_similarity(
             dim = model.get_sentence_embedding_dimension() or 768
             return np.zeros((len(chunks), dim), dtype=np.float32)
 
+    # Batch-encode all chunks in two passes
     try:
         all_full_embs = _safe_encode(full_chunks, "full-text")
-        _flush_mps_cache()
+        _flush_mps_cache()                             # Free GPU memory between passes
         all_key_embs  = _safe_encode(key_chunks,  "key-sections")
         _flush_mps_cache()
     except Exception as exc:
         logger.error("[SemanticMatcher] Batch encoding failed: %s", exc)
         raise RuntimeError(f"Batch embedding error: {exc}") from exc
 
+    # Compute per-resume similarity scores
     results = []
-
     for i, filename in enumerate(filenames):
         f_start, f_end = full_offsets[i]
         k_start, k_end = key_offsets[i]
 
-        # Known-empty resumes: offsets are equal (no chunks were added)
+        # Empty resumes have equal start/end offsets (no chunks were added)
         is_empty = (f_start == f_end)
-
         if is_empty:
             results.append({"filename": filename, "similarity_score": 0.0, "oom_fallback": False})
             continue
 
+        # Pool per-resume chunks into single vectors
         full_emb = _pool_chunks(all_full_embs[f_start:f_end], use_max=_use_max_pool)
         key_emb  = _pool_chunks(all_key_embs[k_start:k_end],  use_max=_use_max_pool)
 
-        # Both jd_emb and pooled resume embeddings are unit-normalised → dot product == cosine similarity.
-        # Avoids redundant np.linalg.norm() calls that cosine_similarity() would perform.
+        # Cosine similarity via dot product (both vectors are unit-normalised)
         full_score = float(np.clip(np.dot(full_emb, jd_emb), 0.0, 1.0))
         key_score  = float(np.clip(np.dot(key_emb,  jd_emb), 0.0, 1.0))
 
-        combined = float(np.clip(0.40 * full_score + 0.60 * key_score, 0.0, 1.0))  # 40% full + 60% key
+        # Weighted combination: 40% full text + 60% key sections
+        combined = float(np.clip(0.40 * full_score + 0.60 * key_score, 0.0, 1.0))
 
-        # OOM suspect: non-empty resume produced a zero combined score.
-        # _safe_encode returns zero vectors on exhausted retry — they produce 0.0 similarity.
-        # Mark these so score_candidates excludes them from sigmoid calibration and forces 0.0.
+        # OOM detection: non-empty resume producing 0.0 score indicates zero vectors
         oom_suspect = combined == 0.0
 
         results.append({
@@ -519,10 +670,15 @@ def rank_resumes_by_similarity(
             " [OOM?]" if oom_suspect else "",
         )
 
+    # Sort by similarity score descending
     results.sort(key=lambda x: x["similarity_score"], reverse=True)
     logger.info("[SemanticMatcher] Ranking complete.")
     return results
 
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  SKILL-LEVEL SEMANTIC MATCHING                                         ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def compute_skill_semantic_matches(
     candidate_skills: list,
@@ -531,24 +687,48 @@ def compute_skill_semantic_matches(
     threshold: Optional[float] = None,
     req_embs: Optional[np.ndarray] = None,
 ) -> set:
-    """Return the set of required skills semantically matched by the candidate's skill list."""
+    """Return the set of required skills semantically matched by a candidate's skill list.
+
+    For each required skill, computes cosine similarity against all candidate
+    skills using the embedding model. If the highest similarity exceeds the
+    per-model threshold, the required skill is considered matched.
+
+    This is a standalone utility — the main pipeline (app.py) uses an inline
+    batched version for better performance across all candidates.
+
+    Args:
+        candidate_skills: List of skills extracted from the candidate's resume.
+        required_skills:  List of skills required by the job description.
+        model_name:       Embedding model to use for similarity computation.
+        threshold:        Custom match threshold (defaults to per-model value).
+        req_embs:         Pre-computed required skill embeddings (optional optimisation).
+
+    Returns:
+        Set of required skill strings that were semantically matched.
+    """
     if not candidate_skills or not required_skills:
         return set()
 
+    # Use per-model threshold if not explicitly provided
     if threshold is None:
         threshold = SKILL_THRESHOLD_BY_MODEL.get(model_name, SKILL_SEMANTIC_THRESHOLD)
 
     model = _get_model(model_name)
 
+    # Encode required skills (skip if pre-computed embeddings provided)
     if req_embs is None:
         req_embs = model.encode(
             required_skills, convert_to_numpy=True,
             normalize_embeddings=True, show_progress_bar=False,
         )
+
+    # Encode candidate skills
     cand_embs  = model.encode(
         candidate_skills, convert_to_numpy=True,
         normalize_embeddings=True, show_progress_bar=False,
     )
+
+    # Compute similarity matrix: required_skills × candidate_skills
     sim_matrix = np.dot(req_embs, cand_embs.T)
 
     matched = set()
@@ -556,6 +736,7 @@ def compute_skill_semantic_matches(
         max_sim       = float(np.max(sim_matrix[i]))
         best_cand_idx = int(np.argmax(sim_matrix[i]))
         best_cand     = candidate_skills[best_cand_idx]
+
         if max_sim >= threshold:
             matched.add(req_skill)
             logger.debug("[SemanticMatcher] Skill match  '%s' ↔ '%s'  sim=%.3f", req_skill, best_cand, max_sim)
