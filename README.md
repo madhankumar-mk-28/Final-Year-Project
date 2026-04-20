@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔍 ML - Based Resume Screening System
+#  ML - Based Resume Screening System
 
 ### ML - powered candidate ranking using transformer embeddings
 
