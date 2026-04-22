@@ -53,9 +53,9 @@ No cloud APIs. No data leaves your machine. Fully offline after first model down
 
 ```
 PDF Resumes ──► PDF Parser ──► Information Extractor ──► Semantic Matcher ──► Scoring Engine ──► Ranked Output
-                pdfplumber     regex + 200+ skill DB       SBERT embeddings     weighted formula    React dashboard
-                + PyMuPDF      name·email·phone             two-pass strategy   dynamic threshold   + CSV export
-                  fallback      skills·exp·education         40% full / 60% key  skill + semantic
+                pdfplumber     regex + 200+ skill DB     SBERT embeddings     weighted formula   React dashboard
+                + PyMuPDF      name·email·phone          two-pass strategy    dynamic threshold   + CSV export
+                fallback       skills·exp·education      40% full / 60% key   skill + semantic
 ```
 
 ### Two-Pass Semantic Scoring
