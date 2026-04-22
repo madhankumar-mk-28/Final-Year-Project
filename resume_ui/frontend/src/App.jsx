@@ -281,7 +281,7 @@ const ModelDropdown = ({ activeModel, onChange }) => {
             {/* Dropdown panel */}
             {open && (
                 <div style={{
-                    position: "absolute", top: "calc(100% + 8px)", right: 0, width: 310,
+                    position: "absolute", top: "calc(100% + 8px)", right: 0, width: "min(310px, 92vw)",
                     borderRadius: 14, overflow: "hidden",
                     background: C.drawerBg, border: `1px solid ${C.border}`,
                     boxShadow: "0 16px 48px rgba(0,0,0,.35)", zIndex: 200,
@@ -601,6 +601,56 @@ const Drawer = ({ candidate: c, onClose, isMobile }) => {
 };
 
 
+// ── JD quality validator — runs purely client-side, no backend call ─────────
+// Returns { score 0-4, label, color, reason } for the job description text.
+function validateJD(text) {
+    const t = (text || "").trim();
+    if (!t) return { score: 0, label: "Empty", color: "#ef4444", reason: "Enter a job description to continue." };
+
+    const words = t.split(/\s+/).filter(w => w.length > 1);
+    const wordCount = words.length;
+
+    // Gibberish check: vowel ratio in alphabetic characters
+    const alpha = t.toLowerCase().replace(/[^a-z]/g, "");
+    const vowels = (alpha.match(/[aeiou]/g) || []).length;
+    const vowelRatio = alpha.length > 0 ? vowels / alpha.length : 0;
+
+    // Unique char ratio (random strings score very high)
+    const uniqueRatio = alpha.length > 0 ? new Set(alpha).size / alpha.length : 1;
+
+    // Common English word presence
+    const COMMON = new Set(["the","a","an","and","or","to","of","in","for","with",
+        "is","are","we","you","this","will","be","as","work","role","team","skills",
+        "experience","knowledge","ability","candidate","position","need","looking",
+        "required","develop","build","manage","design","degree","years","good"]);
+    const hasEnglish = words.slice(0, 40).some(w => COMMON.has(w.toLowerCase().replace(/[^a-z]/g, "")));
+
+    if (wordCount < 6 || vowelRatio < 0.08 || (uniqueRatio > 0.65 && t.length < 120) || !hasEnglish) {
+        return { score: 0, label: "Invalid", color: "#ef4444",
+            reason: wordCount < 6
+                ? `Too short — only ${wordCount} word(s). Write at least a sentence describing the role.`
+                : "Appears to be random text. Please describe the role in plain English." };
+    }
+    if (wordCount < 20) return { score: 1, label: "Weak", color: "#f97316", reason: "Very brief — results may be inaccurate. Add responsibilities and requirements." };
+    if (wordCount < 50) return { score: 2, label: "Fair", color: C.amber, reason: "Moderate detail. Adding specific skills, tools, and responsibilities improves accuracy." };
+    if (wordCount < 100) return { score: 3, label: "Good", color: C.teal, reason: "Good detail. More specific technical terms will further improve matching." };
+    return { score: 4, label: "Excellent", color: C.green, reason: "Detailed job description — optimal for accurate screening." };
+}
+
+// Validate a single skill name — returns null if valid, error string if invalid
+function validateSkillInput(raw) {
+    const s = raw.trim();
+    if (s.length < 2) return "Skill name must be at least 2 characters.";
+    if (s.length > 50) return "Skill name too long (max 50 characters).";
+    if (!/[a-zA-Z]/.test(s)) return "Skill must contain at least one letter.";
+    const alpha = s.replace(/[^a-z]/gi, "").toLowerCase();
+    if (alpha.length >= 6) {
+        const vowels = (alpha.match(/[aeiou]/g) || []).length;
+        if (vowels / alpha.length < 0.05) return `"${s}" doesn't look like a real skill name.`;
+    }
+    return null;
+}
+
 const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, backendOnline }) => {
     const [fileItems, setFileItems] = useState([]);
     const [isDragging, setIsDragging] = useState(false);
@@ -610,6 +660,7 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
     const [newSkill, setNewSkill] = useState("");
     const [minExp, setMinExp] = useState(0);
     const [skillWeight, setSkillWeight] = useState(55);
+    const [configLoaded, setConfigLoaded] = useState(false);
     const fileRef = useRef();
     const jdRef = useRef();
 
@@ -622,12 +673,14 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
             .then(r => r.json())
             .then(data => {
                 if (!data) return;
-                if (data.job_description) setJd(data.job_description);
-                if (data.required_skills?.length) setSkills(data.required_skills);
+                let loaded = false;
+                if (data.job_description) { setJd(data.job_description); loaded = true; }
+                if (data.required_skills?.length) { setSkills(data.required_skills); loaded = true; }
                 if (data.scoring?.min_experience_years !== undefined)
                     setMinExp(data.scoring.min_experience_years);
                 if (data.scoring?.skill_weight !== undefined)
                     setSkillWeight(Math.round(data.scoring.skill_weight * 100));
+                if (loaded) setConfigLoaded(true);
             })
             .catch(() => { /* silently ignore if backend is offline */ });
     }, []); // BASE is a module-level constant — intentional empty deps
@@ -745,19 +798,36 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
         }
     }, [addFiles, collectPdfsFromEntry]);
 
-    const canStart = fileItems.length > 0 && jd.trim().length > 10 && backendOnline !== false;
+    const jdQuality = validateJD(jd);
+    const canStart = fileItems.length > 0 && jdQuality.score > 0 && backendOnline !== false;
     const activeM = MODELS[activeModel] || MODELS.mpnet;
 
-    // Parse comma-separated input and add unique skills
+    // Parse comma-separated input and add unique skills — with validation
     const addSkill = (raw = newSkill) => {
-        const parts = raw.split(",").map(s => s.trim().toLowerCase()).filter(s => s.length > 0);
-        setSkills(prev => { const ex = new Set(prev); return [...prev, ...parts.filter(s => !ex.has(s))]; });
+        const parts = raw.split(",").map(s => s.trim()).filter(s => s.length > 0);
+        const invalid = [];
+        const toAdd = [];
+        parts.forEach(p => {
+            const err = validateSkillInput(p);
+            if (err) invalid.push(err);
+            else toAdd.push(p.toLowerCase());
+        });
+        if (invalid.length) {
+            showToast(invalid[0], "error");
+        }
+        if (toAdd.length) {
+            setSkills(prev => { const ex = new Set(prev); return [...prev, ...toAdd.filter(s => !ex.has(s))]; });
+        }
         setNewSkill("");
     };
     const handleSkillKeyDown = (e) => { if (e.key === "Enter") { e.preventDefault(); addSkill(); } };
 
     const handleStart = () => {
         if (!canStart) return;
+        if (jdQuality.score === 0) {
+            showToast(jdQuality.reason, "error");
+            return;
+        }
         onStartScreening({ jd, skills, minExp, skillWeight, fileCount: fileItems.length, rawFiles: fileItems.map(f => f.raw), model: activeModel });
     };
 
@@ -767,6 +837,17 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
                 <h2 style={{ fontSize: 21, fontWeight: 800, color: C.text, margin: 0 }}>Upload & Configure</h2>
                 <p style={{ color: C.sub, marginTop: 5, fontSize: 13 }}>Add PDF resumes, set your job requirements, and let the ML pipeline rank your candidates.</p>
             </div>
+
+            {/* Config loaded notice — dismissible */}
+            {configLoaded && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderRadius: 10, background: `${C.blue}08`, border: `1px solid ${C.blue}22`, fontSize: 12 }}>
+                    <Info size={13} color={C.blue} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1, color: C.sub }}>
+                        <strong style={{ color: C.blue }}>Pre-filled from saved Job Config.</strong> The values below are editable — what you see here is exactly what gets sent to the pipeline. Changes here do <em>not</em> affect the saved config.
+                    </span>
+                    <button onClick={() => setConfigLoaded(false)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted, padding: 2, display: "flex" }}><X size={12} /></button>
+                </div>
+            )}
 
             {/* Backend offline banner */}
             {backendOnline === false && (
@@ -950,9 +1031,22 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
             <div ref={jdRef} style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 18, alignItems: "stretch" }}>
                 {/* Left column: JD */}
                 <div style={{ ...card(), display: "flex", flexDirection: "column" }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 14, display: "flex", alignItems: "center", gap: 7 }}>
-                        <Briefcase size={12} /> Job Description
+                    <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 6, display: "flex", alignItems: "center", gap: 7, justifyContent: "space-between" }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 7 }}><Briefcase size={12} /> Job Description</span>
+                        {/* Live JD quality badge */}
+                        {jd.trim() && (
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 10px", borderRadius: 20, background: `${jdQuality.color}18`, color: jdQuality.color, border: `1px solid ${jdQuality.color}30`, letterSpacing: ".04em" }}>
+                                {jdQuality.label}
+                            </span>
+                        )}
                     </div>
+                    {/* Quality hint */}
+                    {jd.trim() && jdQuality.score < 3 && (
+                        <div style={{ fontSize: 11, color: jdQuality.color, marginBottom: 8, display: "flex", alignItems: "flex-start", gap: 6, lineHeight: 1.5 }}>
+                            <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+                            {jdQuality.reason}
+                        </div>
+                    )}
                     <label style={{ fontSize: 12, color: C.sub, display: "block", marginBottom: 6 }}>Describe the Role *</label>
                     <textarea value={jd} onChange={e => { setJd(e.target.value); e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
                         placeholder="Describe what the candidate will be doing, required responsibilities, and what you expect from them. Be specific for better results."
@@ -1079,7 +1173,9 @@ const UploadView = ({ onStartScreening, activeModel, onModelChange, isMobile, ba
                             ? "Start the Flask backend (python app.py) before running a screening."
                             : fileItems.length === 0
                                 ? "Upload at least one resume PDF to continue."
-                                : "Add a job description (at least 10 characters) to continue."}
+                                : jdQuality.score === 0
+                                    ? jdQuality.reason
+                                    : "Add a valid job description (at least 6 words) to continue."}
                     </div>
                 )}
             </div>
@@ -1533,6 +1629,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
     return (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
+
             {/* KPI strip — four inline stat tiles */}
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: 10 }}>
                 {[
@@ -1666,6 +1763,7 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                 </div>
             </div>
 
+
             {/* About This System */}
             <FieldCard label="About This System" dot={C.blue}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
@@ -1678,16 +1776,41 @@ const DashboardView = ({ results, onNav, isMobile, activeModel, onModelChange })
                     </div>
                 </div>
 
-                {/* Pipeline steps — simple visual */}
+                {/* Pipeline steps — accurate descriptions per active model */}
                 <div style={{ marginBottom: 20 }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 10 }}>How it works — 5 step pipeline</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         {[
-                            { step: "1", label: "Upload PDFs", desc: "Resumes uploaded as PDF files. System parses text using pdfplumber with PyMuPDF as fallback.", color: C.blue },
-                            { step: "2", label: "Extract Info", desc: "Name, email, phone, skills, experience extracted from raw text using regex and a 150+ skill database.", color: C.teal },
-                            { step: "3", label: "Semantic Embedding", desc: `Resume text and job description are converted into ${MODELS[activeModel]?.detail?.split("·")[0]?.trim() || "768-dim"} vectors. The active model (${MODELS[activeModel]?.name || "MPNet"}) encodes meaning so that similar concepts score high even without matching exact words.`, color: "#a78bfa" },
-                            { step: "4", label: "Cosine Similarity", desc: "Two-pass scoring: 40% full-resume embedding + 60% key-sections (Skills, Experience, Projects). Dot product with JD vector gives the semantic score.", color: C.amber },
-                            { step: "5", label: "Weighted Ranking", desc: `Final Score = (Skill × Skill Score) + (Semantic × Semantic Score). Default weights: ${MODELS[activeModel || "mpnet"]?.key === "arctic" ? "50/50" : "55% skill / 45% semantic"}. Sorted highest to lowest — top candidates shortlisted.`, color: C.green },
+                            {
+                                step: "1", label: "Upload PDFs", color: C.blue,
+                                desc: "Resume PDF files are uploaded to a temporary session folder on the Flask server. Text is extracted using pdfplumber, with PyMuPDF (fitz) as a fallback for scanned or complex PDFs.",
+                            },
+                            {
+                                step: "2", label: "Extract Info", color: C.teal,
+                                desc: "Candidate name, email, phone, LinkedIn/GitHub links, skills, and experience years are extracted from raw text using regex patterns and a curated 150+ skill keyword database.",
+                            },
+                            {
+                                step: "3", label: "Semantic Embedding", color: "#a78bfa",
+                                desc: `Resume text and job description are independently encoded into ${activeModel === "mxbai" ? "1024" : "768"}-dimensional dense vectors using ${MODELS[activeModel]?.name || "MPNet"} (${MODELS[activeModel]?.short || "sentence-transformers/all-mpnet-base-v2"}). The model captures semantic meaning, not just keyword overlap.`,
+                            },
+                            {
+                                step: "4", label: "Cosine Similarity", color: C.amber,
+                                desc: "Two-pass cosine similarity: 40% weight on the full resume embedding + 60% weight on key-section embeddings (Skills, Experience, Projects blocks). Final semantic score is sigmoid-calibrated and dampened by JD quality factor.",
+                            },
+                            {
+                                step: "5", label: "Weighted Scoring & Ranking", color: C.green,
+                                desc: (() => {
+                                    // Show the actual weights used in the last run if available
+                                    const r0 = results?.[0];
+                                    const sw = r0?.skill_weight != null
+                                        ? Math.round(r0.skill_weight * 100)
+                                        : r0 != null ? 55 : null;
+                                    const weightStr = sw != null
+                                        ? `This batch used ${sw}% skill / ${100 - sw}% semantic.`
+                                        : "Default: 55% skill / 45% semantic — configurable in the Upload tab.";
+                                    return `Final Score = (Skill Weight × Skill Score) + (Semantic Weight × Semantic Score). ${weightStr} Shortlist threshold = 60th percentile of the batch's final scores.`;
+                                })(),
+                            },
                         ].map(({ step, label, desc, color }) => (
                             <div key={step} style={{ display: "flex", gap: 12, padding: "10px 14px", borderRadius: 10, background: `${color}12`, border: `1px solid ${color}24` }}>
                                 <div style={{ width: 24, height: 24, borderRadius: 7, background: `${color}16`, border: `1px solid ${color}28`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 900, color, flexShrink: 0, marginTop: 1 }}>{step}</div>
@@ -1928,6 +2051,7 @@ const CandidatesView = ({ results, onNav, isMobile }) => {
  */
 const JobConfigView = ({ isMobile }) => {
     const [saved, setSaved] = useState(false);
+    const [saveError, setSaveError] = useState(null);
     const [cfg, setCfg] = useState({ jd: "", skills: [], minExp: 0, skillW: 55, semanticW: 45 });
     const [newSkill, setNewSkill] = useState("");
 
@@ -1949,13 +2073,27 @@ const JobConfigView = ({ isMobile }) => {
     }, []); // BASE is a module-level constant — intentional empty deps
 
     const addCfgSkill = (raw = newSkill) => {
-        const parts = raw.split(",").map(s => s.trim().toLowerCase()).filter(s => s.length > 0);
-        setCfg(prev => { const ex = new Set(prev.skills); return { ...prev, skills: [...prev.skills, ...parts.filter(s => !ex.has(s))] }; });
+        const parts = raw.split(",").map(s => s.trim()).filter(s => s.length > 0);
+        const toAdd = [], invalid = [];
+        parts.forEach(p => {
+            const err = validateSkillInput(p);
+            if (err) invalid.push(err);
+            else toAdd.push(p.toLowerCase());
+        });
+        if (invalid.length) setSaveError(invalid[0]);
+        if (toAdd.length) setCfg(prev => { const ex = new Set(prev.skills); return { ...prev, skills: [...prev.skills, ...toAdd.filter(s => !ex.has(s))] }; });
         setNewSkill("");
     };
 
     // POST the current config to Flask; show a "Saved" confirmation on success
     const save = async () => {
+        const jdQ = validateJD(cfg.jd);
+        if (jdQ.score === 0) {
+            setSaveError(`Cannot save: ${jdQ.reason}`);
+            setTimeout(() => setSaveError(null), 5000);
+            return;
+        }
+        setSaveError(null);
         try {
             const res = await fetch(`${BASE}/api/config`, {
                 method: "POST",
@@ -1974,9 +2112,13 @@ const JobConfigView = ({ isMobile }) => {
             if (res.ok) {
                 setSaved(true);
                 setTimeout(() => setSaved(false), 2500);
+            } else {
+                setSaveError("Failed to save — is the Flask backend running?");
+                setTimeout(() => setSaveError(null), 5000);
             }
         } catch {
-            // Could not reach backend — silently ignore (button stays unsaved)
+            setSaveError("Cannot reach backend — start Flask with: python app.py");
+            setTimeout(() => setSaveError(null), 5000);
         }
     };
 
@@ -2005,9 +2147,17 @@ const JobConfigView = ({ isMobile }) => {
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 18, alignItems: "stretch" }}>
                 {/* Left: JD */}
                 <div style={{ ...card(), display: "flex", flexDirection: "column" }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 14, display: "flex", alignItems: "center", gap: 7 }}>
-                        <Briefcase size={12} /> Job Description
+                    <div style={{ fontSize: 11, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 6, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7 }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 7 }}><Briefcase size={12} /> Job Description</span>
+                        {cfg.jd.trim() && (() => { const q = validateJD(cfg.jd); return (
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 10px", borderRadius: 20, background: `${q.color}18`, color: q.color, border: `1px solid ${q.color}30` }}>{q.label}</span>
+                        ); })()}
                     </div>
+                    {cfg.jd.trim() && (() => { const q = validateJD(cfg.jd); return q.score < 3 ? (
+                        <div style={{ fontSize: 11, color: q.color, marginBottom: 8, display: "flex", gap: 5, alignItems: "flex-start", lineHeight: 1.5 }}>
+                            <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />{q.reason}
+                        </div>
+                    ) : null; })()}
                     <textarea value={cfg.jd} onChange={e => { setCfg(p => ({ ...p, jd: e.target.value })); e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
                         placeholder="Describe what the candidate will be doing, required responsibilities, and what you expect from them. Be specific for better results."
                         style={{ flex: 1, width: "100%", background: C.inputBg, border: `1px solid ${C.border}`, borderRadius: 10, color: C.cardText, fontSize: 13, padding: "10px 12px", resize: "none", outline: "none", fontFamily: "inherit", lineHeight: 1.6, boxSizing: "border-box", overflow: "hidden", minHeight: 160 }} />
@@ -2061,6 +2211,14 @@ const JobConfigView = ({ isMobile }) => {
                     ))}
                 </div>
             </div>
+
+            {/* Save error banner */}
+            {saveError && (
+                <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 16px", borderRadius: 10, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.22)", fontSize: 12, color: "#ef4444" }}>
+                    <AlertCircle size={13} style={{ flexShrink: 0 }} />
+                    {saveError}
+                </div>
+            )}
 
             {/* Centered save button */}
             <div style={{ display: "flex", justifyContent: "center" }}>
@@ -3009,59 +3167,81 @@ const AnalyticsView = ({ results, isMobile, onNav, activeModel }) => {
                                     const sk = Math.round((c.skillScore || 0) * 100);
                                     const se = Math.round((c.semanticScore || 0) * 100);
                                     const fs = Math.round((c.finalScore || 0) * 100);
+                                    const thresh = Math.round((c.dynamic_threshold || 0.5) * 100);
                                     const reason = c.rejection_reason || "Did not meet criteria";
                                     const code = c.rejection_code || "";
+                                    const isDomainMismatch = se < 35;
                                     let strengths = [], gaps = [], recommendation = "";
                                     if (code === "no_contact") {
-                                        strengths = sk > 40 ? [`Skill coverage: ${sk}%`] : [];
-                                        gaps = ["No contact information found (email or phone number missing)"];
-                                        recommendation = "Candidate cannot be contacted for further steps. Request updated resume with valid contact details.";
+                                        strengths = sk > 40 ? [`Skill coverage: ${sk}%`] : se > 45 ? [`Role alignment: ${se}%`] : [];
+                                        gaps = ["No contact information found in the resume (email or phone missing)"];
+                                        recommendation = `Cannot proceed to interview stage without contact details. Ask candidate to resubmit with valid email or phone number.`;
 
                                     } else if (code === "skill_below_min") {
                                         strengths = se > 50 ? [`Role alignment: ${se}%`] : [];
-                                        gaps = [`Low skill alignment: Only ${sk}% of required skills matched (minimum 30%)`];
-                                        recommendation = "Candidate lacks most core skills required for this role. Consider for junior positions or roles with lower skill requirements.";
+                                        if (isDomainMismatch) {
+                                            gaps = [
+                                                `Only ${sk}% of required skills matched (minimum 30%)`,
+                                                `Very low semantic alignment (${se}%) — indicates a likely domain mismatch`,
+                                            ];
+                                            recommendation = "Candidate's background appears to be from a different field (e.g. aeronautical, civil, mechanical). This role requires a different skill domain. Not suitable unless cross-domain skills are acceptable.";
+                                        } else {
+                                            gaps = [`Only ${sk}% of required skills matched — minimum threshold is 30%`];
+                                            recommendation = `Candidate lacks core skills for this role. Suitable for junior positions or roles with relaxed skill requirements.`;
+                                        }
 
                                     } else if (code === "experience_below_min") {
                                         strengths = sk > 50 ? [`Skill coverage: ${sk}%`] : [];
-                                        gaps = [c.rejection_reason || "Experience below minimum requirement"];
-                                        recommendation = "Candidate does not meet the required experience level. Consider for junior roles if skill alignment is strong.";
+                                        gaps = [reason || "Experience below the configured minimum requirement"];
+                                        recommendation = "Does not meet the seniority level required. Consider for a junior or entry-level variant of this role if skill alignment is strong.";
 
                                     } else if (code === "missing_education") {
-                                        strengths = sk > 50
-                                            ? [`Skill coverage: ${sk}%`]
-                                            : se > 50
-                                                ? [`Role alignment: ${se}%`]
-                                                : [];
-                                        gaps = ["Required educational qualification not identified"];
-                                        recommendation = "Verify if the qualification is listed under a different format, or reassess if this requirement is mandatory.";
+                                        strengths = sk > 50 ? [`Skill coverage: ${sk}%`] : se > 50 ? [`Role alignment: ${se}%`] : [];
+                                        gaps = ["Required educational qualification was not detected in the resume"];
+                                        recommendation = "Verify if the qualification exists under a different format or abbreviation. If the education requirement is flexible, consider manual review.";
 
                                     } else if (code === "score_below_threshold") {
-                                        strengths = sk > 50
-                                            ? [`Skill coverage: ${sk}%`]
-                                            : se > 50
-                                                ? [`Role alignment: ${se}%`]
-                                                : [];
-                                        gaps = [`Overall fit below threshold: Final score ${fs}% is below the batch benchmark`];
-                                        recommendation = "Candidate is below the competitive range for this batch. May be suitable in a less competitive pool.";
+                                        if (isDomainMismatch) {
+                                            strengths = sk > 50 ? [`Skill coverage: ${sk}%`] : [];
+                                            gaps = [
+                                                `Final score ${fs}% is below the batch threshold of ${thresh}%`,
+                                                `Semantic alignment is very low (${se}%) — likely a domain mismatch`,
+                                            ];
+                                            recommendation = "Candidate's background appears unrelated to this role's domain. In a competitive batch, this candidate does not reach the shortlist threshold. No further action recommended.";
+                                        } else {
+                                            strengths = sk > 50 ? [`Skill coverage: ${sk}%`] : se > 50 ? [`Role alignment: ${se}%`] : [];
+                                            gaps = [`Final score ${fs}% is below the competitive batch threshold of ${thresh}%`];
+                                            recommendation = `Below the cutoff for this specific batch. This candidate may be suitable in a less competitive pool or for a different role.`;
+                                        }
 
                                     } else {
                                         strengths = sk > 50 ? [`Skill coverage: ${sk}%`] : [];
-                                        gaps = [`Role alignment: ${se}%`, `Final score: ${fs}%`];
-                                        recommendation = "Candidate does not meet key requirements. Consider manual review if there are strong external factors (e.g., referral).";
+                                        if (isDomainMismatch) {
+                                            gaps = [
+                                                `Semantic alignment ${se}% — likely unrelated field`,
+                                                `Final score: ${fs}%`,
+                                            ];
+                                            recommendation = "Candidate's background appears to be outside the required domain. Consider only if cross-domain experience is acceptable.";
+                                        } else {
+                                            gaps = [`Role alignment: ${se}%`, `Final score: ${fs}%`];
+                                            recommendation = "Candidate does not meet key requirements for this batch. Manual review warranted only with strong external factors (e.g. referral).";
+                                        }
                                     }
                                     return (
                                         <div key={c.id || i} style={{ borderRadius: 12, border: "1px solid rgba(239,68,68,.14)", overflow: "hidden" }}>
                                             {/* Header row */}
-                                            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "rgba(239,68,68,.05)" }}>
+                                            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "rgba(239,68,68,.05)", flexWrap: "wrap" }}>
                                                 <div style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(239,68,68,.12)", border: "1px solid rgba(239,68,68,.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#ef4444", flexShrink: 0 }}>
                                                     {(c.name || "?").split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase()}
                                                 </div>
-                                                <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div style={{ flex: 1, minWidth: 120 }}>
                                                     <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{c.name || "Unknown"}</div>
                                                     <div style={{ fontSize: 10, color: "#ef4444", marginTop: 1, fontWeight: 600 }}>✗ {reason}</div>
+                                                    {isDomainMismatch && (
+                                                        <div style={{ fontSize: 10, color: "#f97316", marginTop: 2, fontWeight: 600 }}>⚠ Domain mismatch likely — low semantic alignment ({se}%)</div>
+                                                    )}
                                                 </div>
-                                                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                                                <div style={{ display: "flex", gap: 6, flexShrink: 0, flexWrap: "wrap" }}>
                                                     {[["Skill", sk, C.blue], ["Semantic", se, C.teal], ["Final", fs, "#ef4444"]].map(([l, v, col]) => (
                                                         <div key={l} style={{ textAlign: "center", padding: "4px 8px", borderRadius: 7, background: `${col}09`, border: `1px solid ${col}18`, minWidth: 44 }}>
                                                             <div style={{ fontSize: 12, fontWeight: 800, color: col, fontVariantNumeric: "tabular-nums" }}>{v}%</div>
@@ -3440,7 +3620,7 @@ export default function App() {
                 )}
 
                 {/* Main content area */}
-                <main style={{ flex: 1, display: "flex", flexDirection: "column", overflowY: "auto", maxHeight: "100vh", minWidth: 0 }}>
+                <main style={{ flex: 1, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", maxHeight: "100vh", minWidth: 0 }}>
 
                     {/* Topbar */}
                     <div style={{ padding: isMobile ? "11px 14px" : "14px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, background: C.topbarBg, zIndex: 50, backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", gap: 8, minHeight: 64 }}>
@@ -3486,7 +3666,7 @@ export default function App() {
                     </div>
 
                     {/* Page body */}
-                    <div style={{ flex: 1, padding: isMobile ? "16px 13px" : "22px 26px", animation: "fadeIn .18s ease" }} key={nav}>
+                    <div style={{ flex: 1, padding: isMobile ? "12px 10px" : "22px 26px", animation: "fadeIn .18s ease" }} key={nav}>
                         {renderView()}
                     </div>
                 </main>

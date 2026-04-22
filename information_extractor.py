@@ -215,13 +215,21 @@ _EXP_WORK_PATTERNS = [
     r"(\d+(?:\.\d+)?)\s*\+?\s*years?\s+(?:of\s+)?(?:professional\s+)?(?:work\s+)?experience",
 ]
 
-# Date-range pattern for employment history sections:
+# Date-range pattern for employment history sections.
 # Matches formats like: "Jan 2020 – Dec 2023", "06/2019 - 12/2019", "2020 - Present"
+#
+# Group 1 → start year (4 digits)
+# Group 2 → end year (4 digits) OR "present" / "current" / "ongoing"
+#
+# IMPORTANT: Do NOT use a raw string (r"") for the capturing-group parts of this
+# pattern. In a raw string, \\d{4} becomes the literal characters backslash+d,
+# not the regex digit metacharacter \d. We use a regular string so Python
+# passes a single backslash to the regex engine as intended.
 _MONTH_NAMES = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 _DATE_RANGE_RE = re.compile(
-    r"(?:" + _MONTH_NAMES + r"[.,]?\s*)?(?:\d{1,2}[/\-.])?\\s*(\\d{4})"
-    r"\s*(?:–|—|\-|to)\s*"
-    r"(?:(?:" + _MONTH_NAMES + r"[.,]?\s*)?(?:\d{1,2}[/\-.])?\\s*(\\d{4}|present|current|ongoing|till\\s+date|now))",
+    "(?:" + _MONTH_NAMES + "[.,]?\\s*)?(?:\\d{1,2}[/\\-.])?\\s*(\\d{4})"
+    "\\s*(?:–|—|\\-|to)\\s*"
+    "(?:(?:" + _MONTH_NAMES + "[.,]?\\s*)?(?:\\d{1,2}[/\\-.])?\\s*(\\d{4}|present|current|ongoing|till\\s+date|now))",
     re.IGNORECASE,
 )
 

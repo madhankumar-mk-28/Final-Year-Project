@@ -390,9 +390,30 @@ def _session_results_file(session_id: str) -> Path:
 
 
 def cleanup_stale_sessions(max_age_seconds: int = 3600) -> int:
-    """Remove session folders and result files older than max_age_seconds. Returns count removed."""
+    """Remove upload folders and result files for sessions older than max_age_seconds.
+
+    Safety rules:
+        - Sessions referenced by ANY pending/running task in _task_store are NEVER
+          removed, even if they are older than max_age_seconds. This prevents wiping
+          a session whose screening job is still executing (e.g. large batch > 2h).
+        - Uses newest mtime across the folder and all files inside it, so a session
+          that just had a file added will not be evicted.
+
+    Returns:
+        Number of sessions successfully removed.
+    """
     now, cleaned, errors = time.time(), 0, 0
     logger.info("[Cleanup] Scanning for stale sessions (max_age=%ds).", max_age_seconds)
+
+    # Collect session IDs that are currently referenced by active tasks.
+    # We hold the lock only briefly to copy the IDs, then release it before
+    # doing any filesystem work to avoid blocking the screening workers.
+    with _task_lock:
+        active_sessions = {
+            t.get("session_id")
+            for t in _task_store.values()
+            if t.get("status") in ("pending", "running")
+        }
 
     try:
         entries = list(UPLOAD_BASE.iterdir())
@@ -403,19 +424,26 @@ def cleanup_stale_sessions(max_age_seconds: int = 3600) -> int:
     for d in entries:
         if not d.is_dir():
             continue
-        try:
-            # Use newest mtime across dir + all files inside — keeps recently-screened sessions alive
-            dir_mtime   = d.stat().st_mtime
-            file_times  = [f.stat().st_mtime for f in d.iterdir() if f.is_file()]
-            effective   = max([dir_mtime] + file_times) if file_times else dir_mtime
-            age         = now - effective
-        except OSError:
+
+        session_id = d.name
+
+        # Never evict a session that has a pending or running screening task
+        if session_id in active_sessions:
+            logger.debug("[Cleanup] Skipping active session %s.", session_id)
             continue
+
+        try:
+            # Use newest mtime across dir + all files inside — keeps recently-touched sessions alive
+            dir_mtime  = d.stat().st_mtime
+            file_times = [f.stat().st_mtime for f in d.iterdir() if f.is_file()]
+            effective  = max([dir_mtime] + file_times) if file_times else dir_mtime
+            age        = now - effective
+        except OSError:
+            continue                        # Directory disappeared mid-scan — skip it
 
         if age <= max_age_seconds:
             continue
 
-        session_id = d.name
         try:
             pdf_count = sum(1 for _ in d.glob("*.pdf"))
             shutil.rmtree(d, ignore_errors=True)
@@ -424,6 +452,7 @@ def cleanup_stale_sessions(max_age_seconds: int = 3600) -> int:
             if results_file.exists():
                 results_file.unlink(missing_ok=True)
             cleaned += 1
+            logger.debug("[Cleanup] Removed stale session %s (age=%.0fs).", session_id, age)
         except Exception as e:
             errors += 1
             logger.warning("[Cleanup] Failed to remove session %s: %s", session_id, e)
@@ -433,17 +462,47 @@ def cleanup_stale_sessions(max_age_seconds: int = 3600) -> int:
 
 
 def _cleanup_worker():
-    """Background daemon — hourly cleanup, rate-store pruning, task pruning. Logs heartbeat each cycle."""
+    """Background daemon thread — runs cleanup immediately on first tick, then every hour.
+
+    WHY run immediately on first tick?
+    If the server is restarted after a crash or short session, the startup cleanup
+    already ran once. But if no restart happened and sessions aged out during the
+    server's uptime, the first hourly tick catches them. Starting with an immediate
+    run ensures at-least-once semantics regardless of how long the server has been up.
+
+    WHY a consecutive-error counter?
+    If cleanup_stale_sessions fails repeatedly (e.g. disk permission problem), we
+    escalate from WARNING to ERROR after 3 consecutive failures so the operator
+    is alerted via log monitoring rather than silently continuing.
+    """
     logger.info("[Cleanup] Background worker started (pid=%d).", os.getpid())
+    consecutive_errors = 0
+
+    # Run immediately on first tick, then sleep 1 hour between subsequent ticks.
+    # This covers the case where the server runs for < 1 hour before being stopped.
+    first_tick = True
+
     while True:
-        time.sleep(3600)
-        logger.info("[Cleanup] Worker heartbeat — running hourly tasks.")
+        if not first_tick:
+            time.sleep(3600)          # Wait 1 hour between scheduled cleanups
+        first_tick = False
+
+        logger.info("[Cleanup] Worker heartbeat — running periodic tasks.")
         try:
             _prune_rate_store()
             _prune_tasks()
             cleanup_stale_sessions(max_age_seconds=7200)
+            consecutive_errors = 0    # Reset on success
         except Exception as exc:
-            logger.error("[Cleanup] Unexpected error in worker: %s", exc, exc_info=True)
+            consecutive_errors += 1
+            if consecutive_errors >= 3:
+                # Escalate to ERROR after 3 consecutive failures
+                logger.error(
+                    "[Cleanup] Worker failed %d times in a row: %s",
+                    consecutive_errors, exc, exc_info=True,
+                )
+            else:
+                logger.warning("[Cleanup] Worker error (attempt %d): %s", consecutive_errors, exc)
 
 
 # Startup init — guarded by Event so it runs exactly once per process
@@ -468,8 +527,31 @@ def _startup_init():
     # startup, allowing the server to accept health-check / upload requests immediately.
     logger.info("[Startup] Model loading deferred to first /api/screen call (lazy).")
 
-    # Register executor shutdown on SIGTERM/atexit — prevents stranded _active_screenings counter
+    # Register executor shutdown on normal Python exit (atexit fires on sys.exit and
+    # end-of-script but NOT on SIGKILL). cancel_futures=True drops any queued but
+    # not-yet-started screening jobs so they don't run after shutdown.
     atexit.register(lambda: _screening_executor.shutdown(wait=False, cancel_futures=True))
+
+    # Register SIGTERM handler so `kill <pid>` and Docker/systemd stop signals trigger
+    # a graceful cleanup pass before the process exits. Without this, SIGTERM causes an
+    # immediate exit and atexit handlers do NOT run.
+    def _handle_sigterm(signum, frame):
+        logger.info("[Shutdown] SIGTERM received — running final cleanup pass.")
+        try:
+            cleanup_stale_sessions(max_age_seconds=0)   # 0 = remove ALL sessions immediately
+        except Exception as e:
+            logger.warning("[Shutdown] Final cleanup error: %s", e)
+        _screening_executor.shutdown(wait=False, cancel_futures=True)
+        raise SystemExit(0)
+
+    import signal
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+        logger.info("[Startup] SIGTERM handler registered.")
+    except (OSError, ValueError) as e:
+        # ValueError raised if signal.signal is called from a non-main thread
+        # (e.g. Gunicorn worker threads). This is safe to ignore.
+        logger.debug("[Startup] Could not register SIGTERM handler: %s", e)
 
     t = threading.Thread(target=_cleanup_worker, daemon=True, name="cleanup-worker")
     t.start()
@@ -505,11 +587,24 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    """Atomic write via temp file — readers always see a complete JSON file."""
+    """Atomic write via temp file — readers always see a complete JSON file.
+
+    Using a temp-file rename (write to .tmp → replace .json) is safer than
+    writing directly, because a crash mid-write would leave a complete old file
+    rather than a half-written corrupt one.
+    """
     tmp = CONFIG_FILE.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2)
-    tmp.replace(CONFIG_FILE)
+    try:
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        tmp.replace(CONFIG_FILE)
+    except OSError as e:
+        logger.error("[Config] Failed to save config.json: %s", e)
+        try:
+            tmp.unlink(missing_ok=True)  # Clean up the temp file if it was created
+        except OSError:
+            pass
+        raise  # Re-raise so the API endpoint returns a 500 to the caller
 
 
 def allowed_file(filename: str) -> bool:
@@ -541,7 +636,9 @@ def _existing_hashes(folder: Path) -> dict:
     return hashes
 
 
-def serialize_results(results: list, skills_configured: bool = True) -> list:
+def serialize_results(results: list, skills_configured: bool = True,
+                      skill_weight: float | None = None,
+                      jd_quality: float | None = None) -> list:
     """Convert scoring engine output to JSON-safe dicts for the React frontend."""
     serialized = []
     for rank, r in enumerate(results, start=1):
@@ -563,23 +660,39 @@ def serialize_results(results: list, skills_configured: bool = True) -> list:
             "finalScore":       r.get("final_score", 0.0),
             "eligible":         r.get("eligible", False),
             "rejection_reason": r.get("rejection_reason", ""),
-            "rejection_code":   r.get("rejection_code", ""),   # stable enum for frontend switch
+            "rejection_code":   r.get("rejection_code", ""),
             "status":           "Shortlisted" if r.get("eligible") else "Rejected",
             "band":             r.get("band", ""),
             "dynamic_threshold": r.get("dynamic_threshold", 0.5),
             "fn_recovered":      r.get("fn_recovered", False),
             "skills_configured": skills_configured,
+            # Batch-level metadata (same for all rows — used by Dashboard Step 5)
+            "skill_weight":      round(skill_weight, 4) if skill_weight is not None else None,
+            "jd_quality":        round(jd_quality, 2)   if jd_quality  is not None else None,
             "links":            {k: (v or "") for k, v in (r.get("links") or {"linkedin": "", "github": "", "portfolio": ""}).items()},
         })
     return serialized
 
 
 def _write_results(results_file: Path, serialized: list):
-    """Atomic results write — readers always see a complete file."""
+    """Atomic results write — readers always see a complete file.
+
+    Same temp-file pattern as save_config. If this fails (e.g. disk full),
+    the error propagates to _run_screening_pipeline's outer try/except,
+    which records it as a pipeline error rather than silently losing results.
+    """
     tmp = results_file.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(serialized, f, indent=2)
-    tmp.replace(results_file)
+    try:
+        with open(tmp, "w") as f:
+            json.dump(serialized, f, indent=2)
+        tmp.replace(results_file)
+    except OSError as e:
+        logger.error("[Pipeline] Failed to write results file %s: %s", results_file, e)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise  # Propagate so the pipeline task is marked as error, not silently dropped
 
 
 # Candidate deduplication — merges profiles that share the same email address
@@ -660,6 +773,49 @@ def merge_duplicate_candidates(extracted: dict) -> dict:
     return merged
 
 
+def _compute_jd_quality_factor(job_description: str) -> float:
+    """Return a 0.0–1.0 quality multiplier for the JD to dampen semantic inflation.
+
+    Logic:
+        - Very short or vague JDs (< 10 words, no professional keywords) → 0.40
+        - Short JDs (< 25 words) with few keywords → 0.60
+        - Medium JDs with some structure → 0.75–0.90
+        - Full professional JDs → 1.00
+
+    The factor is applied AFTER sigmoid calibration so it only dampens
+    ambiguous/vague descriptions, not legitimate lower-match scores.
+    """
+    if not job_description:
+        return 0.40
+
+    words = job_description.lower().split()
+    word_count = len(words)
+
+    # Hard floor: trivially short JD
+    if word_count < 10:
+        return 0.40
+
+    # Professional keyword check
+    pro_keywords = [
+        "experience", "skills", "responsibilities", "requirements",
+        "qualifications", "proficiency", "develop", "design", "manage",
+        "knowledge", "ability", "team", "implement", "analyze",
+        "role", "position", "degree", "candidate", "job", "work",
+    ]
+    matched_kw = sum(1 for kw in pro_keywords if kw in " ".join(words))
+
+    # Compute factor from word count + keyword density
+    if word_count < 20 and matched_kw < 2:
+        return 0.45
+    if word_count < 40 and matched_kw < 3:
+        return 0.60
+    if word_count < 60 or matched_kw < 4:
+        return 0.78
+    if word_count < 80 or matched_kw < 5:
+        return 0.90
+    return 1.00
+
+
 def _compute_similarities(model_key: str, resume_texts: dict, job_description: str) -> tuple[list, dict]:
     model_name = VALID_MODELS[model_key]
     logger.info("[Pipeline] Step 3 — Computing semantic similarity (%s)...", model_name)
@@ -667,6 +823,96 @@ def _compute_similarities(model_key: str, resume_texts: dict, job_description: s
 
 
 # Core ML pipeline — submitted to ThreadPoolExecutor by POST /api/screen
+
+# Common English words used by the gibberish detector (_is_gibberish_jd).
+# Purpose: verify the JD contains real English before running the ML pipeline.
+#
+# These differ from the pro_keywords list inside _compute_jd_quality_factor:
+#   - _COMMON_WORDS: basic English vocabulary ("the", "and", "for") — proves text is English
+#   - pro_keywords:  job-specific terms ("responsibilities", "qualifications") — measures JD depth
+_COMMON_WORDS = frozenset([
+    "the", "a", "an", "and", "or", "to", "of", "in", "for", "with", "is", "are",
+    "we", "our", "you", "your", "this", "that", "will", "be", "as", "at", "by",
+    "have", "has", "can", "must", "should", "who", "what", "how", "work", "role",
+    "team", "skills", "experience", "knowledge", "ability", "strong", "good",
+    "need", "looking", "required", "ideal", "candidate", "position", "join",
+    "develop", "build", "manage", "design", "responsible", "degree", "years",
+])
+
+
+def _is_gibberish_jd(text: str) -> tuple[bool, str]:
+    """Return (is_gibberish, reason). Detects random / nonsense job descriptions.
+
+    Checks performed (all must pass to be considered valid):
+      1. Minimum 6 real words (length > 1 after splitting on whitespace)
+      2. At least 1 common English word among the first 40 tokens
+      3. Vowel ratio >= 15% of all alphabetic characters
+      4. Unique-character ratio <= 85% of total characters (random strings
+         have nearly every character unique; real text repeats letters)
+    """
+    if not text or not text.strip():
+        return True, "Job description is empty."
+
+    words = [w for w in text.strip().split() if len(w) > 1]
+    if len(words) < 6:
+        return True, (
+            f"Job description is too short ({len(words)} word(s)). "
+            "Please write at least a few sentences describing the role."
+        )
+
+    sample = [w.lower().strip(".,;:!?") for w in words[:40]]
+    has_common = any(w in _COMMON_WORDS for w in sample)
+    if not has_common:
+        return True, (
+            "Job description does not appear to contain recognisable English. "
+            "Please describe the role in plain language."
+        )
+
+    alpha = [ch for ch in text.lower() if ch.isalpha()]
+    if alpha:
+        vowel_ratio = sum(1 for ch in alpha if ch in "aeiou") / len(alpha)
+        if vowel_ratio < 0.08:          # random consonant strings score ~0.02
+            return True, (
+                "Job description appears to be random text (very low vowel ratio). "
+                "Please provide a meaningful description."
+            )
+
+    unique_ratio = len(set(text.lower())) / max(len(text), 1)
+    if unique_ratio > 0.60 and len(text) < 120:
+        return True, (
+            "Job description appears to be random characters. "
+            "Please write a real job description."
+        )
+
+    return False, ""
+
+
+def _validate_skill_names(skills: list) -> tuple[list, list]:
+    """Filter skills list, returning (valid_skills, rejected_skills).
+
+    A skill is rejected if it:
+      - Is shorter than 2 characters
+      - Is longer than 50 characters
+      - Contains no alphabetic characters
+      - Has a vowel ratio below 5% (pure consonant gibberish)
+    """
+    valid, rejected = [], []
+    for s in skills:
+        s = s.strip()
+        if len(s) < 2 or len(s) > 50:
+            rejected.append(s)
+            continue
+        alpha = [c for c in s.lower() if c.isalpha()]
+        if not alpha:
+            rejected.append(s)
+            continue
+        vowels = sum(1 for c in alpha if c in "aeiou")
+        if len(alpha) >= 6 and vowels / len(alpha) < 0.05:
+            rejected.append(s)
+            continue
+        valid.append(s)
+    return valid, rejected
+
 
 def _run_screening_pipeline(
     req_id: str,
@@ -684,6 +930,29 @@ def _run_screening_pipeline(
     parse_failures: list[str] = []
 
     try:
+        # ── Guardrail: reject gibberish JDs before any ML work ──────────
+        is_bad_jd, jd_reason = _is_gibberish_jd(job_description)
+        if is_bad_jd:
+            logger.warning(
+                "[%s] JD rejected as gibberish: %s (len=%d words=%d)",
+                req_id, jd_reason[:80], len(job_description), len(job_description.split()),
+            )
+            return {
+                "error": f"Invalid job description: {jd_reason}",
+                "candidates": [],
+                "results": [],
+            }
+
+        # ── Guardrail: filter gibberish skill names ─────────────────────
+        if required_skills:
+            valid_skills, bad_skills = _validate_skill_names(required_skills)
+            if bad_skills:
+                logger.warning(
+                    "[%s] Filtered %d invalid skill name(s): %s",
+                    req_id, len(bad_skills), bad_skills[:10],
+                )
+            required_skills = valid_skills
+
         # Step 1: Parse PDFs
         logger.info("[%s] Step 1 — Parsing %d PDF(s)...", req_id, len(pdf_files))
         try:
@@ -824,6 +1093,15 @@ def _run_screening_pipeline(
 
         # Step 4: Score and rank
         logger.info("[%s] Step 4 — Scoring and ranking...", req_id)
+
+        # Bug 1 fix: compute JD quality factor to dampen semantic inflation for vague JDs
+        jd_quality = _compute_jd_quality_factor(job_description)
+        if jd_quality < 1.0:
+            logger.info(
+                "[%s] JD quality factor: %.2f (word_count=%d) — semantic scores dampened",
+                req_id, jd_quality, len(job_description.split()),
+            )
+
         candidates = [
             {
                 "filename":               fname,
@@ -835,19 +1113,64 @@ def _run_screening_pipeline(
             }
             for fname, info in extracted.items()
         ]
-        results    = score_candidates(candidates, required_skills, scoring_cfg, model_key=model_key)
-        serialized = serialize_results(results, skills_configured=bool(required_skills))
+        results    = score_candidates(
+            candidates, required_skills, scoring_cfg,
+            model_key=model_key,
+            jd_quality_factor=jd_quality,
+        )
+        serialized = serialize_results(
+            results,
+            skills_configured=bool(required_skills),
+            skill_weight=scoring_cfg.skill_weight,
+            jd_quality=jd_quality,
+        )
 
         _write_results(_session_results_file(session_id), serialized)
 
         shortlisted = sum(1 for r in serialized if r["eligible"])
+        rejected    = len(serialized) - shortlisted
         elapsed_s   = (datetime.now(timezone.utc) - started_at).total_seconds()
         _inc("total_resumes_processed", len(serialized))
 
+        # Bug 4 fix: session-level summary table in terminal
         logger.info(
-            "[%s] Done — %d ranked | %d shortlisted | model: %s | %.1fs",
-            req_id, len(serialized), shortlisted, model_key, elapsed_s,
+            "[%s] ═══ SESSION SUMMARY ═══ %d ranked | %d shortlisted | %d rejected | model: %s | %.1fs",
+            req_id, len(serialized), shortlisted, rejected, model_key, elapsed_s,
         )
+        logger.info(
+            "[%s] Weights — skill=%.0f%% semantic=%.0f%% | JD quality: %.0f%% | Skills configured: %s",
+            req_id,
+            scoring_cfg.skill_weight    * 100,
+            scoring_cfg.semantic_weight * 100,
+            jd_quality * 100,
+            "Yes (%d)" % len(required_skills) if required_skills else "No (semantic-only)",
+        )
+        # Log top 5 + all rejected for easy terminal scan
+        top = [r for r in serialized if r["eligible"]][:5]
+        if top:
+            logger.info("[%s] ▼ TOP shortlisted:", req_id)
+            for r in top:
+                logger.info(
+                    "[%s]   #%d %-28s Final: %3d%% | Skill: %3d%% | Sem: %3d%% | %s",
+                    req_id, r["rank"],
+                    (r["name"] or "Unknown")[:28],
+                    round(r["finalScore"] * 100),
+                    round(r["skillScore"] * 100),
+                    round(r["semanticScore"] * 100),
+                    r.get("band", ""),
+                )
+        rej_list = [r for r in serialized if not r["eligible"]][:5]
+        if rej_list:
+            logger.info("[%s] ▼ TOP rejected:", req_id)
+            for r in rej_list:
+                logger.info(
+                    "[%s]   %-28s Final: %3d%% | %s",
+                    req_id,
+                    (r["name"] or "Unknown")[:28],
+                    round(r["finalScore"] * 100),
+                    r.get("rejection_reason", r.get("rejection_code", "?"))[:60],
+                )
+        logger.info("[%s] ══════════════════════════════════════════════════════", req_id)
 
         # Record metrics (non-blocking, swallows errors)
         try:
@@ -1260,7 +1583,12 @@ def post_config():
 
     existing = load_config()
     existing.update(sanitized)
-    save_config(existing)
+    try:
+        save_config(existing)
+    except OSError as e:
+        # Disk full, permission denied, or similar filesystem error
+        logger.error("[Config] Could not persist config.json: %s", e)
+        return jsonify({"error": "Server could not save the configuration file. Check disk space / permissions."}), 500
     logger.info("[Config] config.json updated (keys: %s).", list(sanitized.keys()))
     return jsonify({"message": "config.json saved."}), 200
 
@@ -1279,7 +1607,12 @@ def set_model():
 
 @app.route("/api/clear", methods=["POST"])
 def clear_uploads():
-    """Delete all uploads and results for a given session_id."""
+    """Delete all uploads and results for a given session_id.
+
+    Safety check: refuses to clear a session that has a pending or running
+    screening task. Clearing mid-pipeline would leave the task with no source
+    PDFs, causing confusing empty-result errors rather than a clean failure.
+    """
     body       = request.get_json(silent=True) or {}
     session_id = body.get("session_id", "")
 
@@ -1288,19 +1621,38 @@ def clear_uploads():
     if not _validate_session_id(session_id):
         return jsonify({"error": "Invalid session_id format."}), 400
 
-    session_folder = UPLOAD_BASE / session_id
-    if session_folder.is_dir():
-        pdf_count = sum(1 for _ in session_folder.glob("*.pdf"))
-        shutil.rmtree(session_folder, ignore_errors=True)
-        _pdf_count_sub(pdf_count)
-        logger.info("[Clear] Session uploads cleared: %s", session_id)
+    # Block clearing a session that is currently being screened
+    with _task_lock:
+        active_task = next(
+            (t for t in _task_store.values()
+             if t.get("session_id") == session_id and t.get("status") in ("pending", "running")),
+            None,
+        )
+    if active_task:
+        return jsonify({
+            "error": "Cannot clear a session that is currently being screened. "
+                     "Wait for the screening to complete first.",
+            "code":  API_ERROR["overloaded"],
+        }), 409   # 409 Conflict
 
+    session_folder = UPLOAD_BASE / session_id
+    pdfs_removed   = 0
+    if session_folder.is_dir():
+        pdfs_removed = sum(1 for _ in session_folder.glob("*.pdf"))
+        shutil.rmtree(session_folder, ignore_errors=True)
+        _pdf_count_sub(pdfs_removed)
+
+    results_removed = False
     results_file = _session_results_file(session_id)
     if results_file.exists():
-        results_file.unlink(missing_ok=True)  # FIX: race with cleanup_worker
-        logger.info("[Clear] Session results cleared: %s", session_id)
+        results_file.unlink(missing_ok=True)
+        results_removed = True
 
-    return jsonify({"message": "Session cleared."}), 200
+    logger.info(
+        "[Clear] Session %s cleared — %d PDF(s) removed, results file: %s.",
+        session_id, pdfs_removed, "yes" if results_removed else "no",
+    )
+    return jsonify({"message": "Session cleared.", "pdfs_removed": pdfs_removed}), 200
 
 
 # ── Global error handlers — return JSON for all error types ────────────────
@@ -1325,7 +1677,19 @@ def handle_413(e):
 
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
-    """Return aggregate screening statistics from metrics_log.jsonl."""
+    """Return aggregate screening statistics from metrics_log.jsonl.
+
+    Response fields:
+        total_runs             — number of screening sessions recorded
+        total_resumes_screened — sum of all resumes processed
+        total_shortlisted      — sum of all shortlisted candidates
+        total_rejected         — sum of all rejected candidates
+        overall_pass_rate      — shortlisted / screened as a percentage
+        models_used            — dict of model_key → run count
+        avg_final_by_model     — dict of model_key → avg final score (%)
+        rejection_code_totals  — dict of rejection_code → count (all runs combined)
+        recent_runs            — last 5 runs (timestamp, model, count, shortlisted)
+    """
     try:
         try:
             runs = metrics_store.load_all_runs()
@@ -1336,40 +1700,82 @@ def get_stats():
             return jsonify({
                 "total_runs": 0,
                 "total_resumes_screened": 0,
+                "total_shortlisted": 0,
+                "total_rejected": 0,
+                "overall_pass_rate": 0,
                 "models_used": {},
-                "avg_score_by_model": {},
+                "avg_final_by_model": {},
+                "rejection_code_totals": {},
+                "recent_runs": [],
             }), 200
 
-        total_runs = len(runs)
-        total_resumes = 0
-        models_used = {}
-        score_sums = {}
-        score_counts = {}
+        total_runs      = len(runs)
+        total_resumes   = 0
+        total_short     = 0
+        total_rej       = 0
+        models_used:     dict = {}
+        score_sums:      dict = {}
+        score_counts:    dict = {}
+        rej_code_totals: dict = {}
 
         for run in runs:
             model = run.get("model_key", "unknown")
             models_used[model] = models_used.get(model, 0) + 1
 
-            finals = run.get("final_scores", [])
-            n = len(finals) if isinstance(finals, list) else 0
-            total_resumes += n
+            n_res   = run.get("resume_count", 0)
+            n_short = run.get("shortlisted",  0)
+            n_rej   = run.get("rejected",     0)
+            total_resumes += n_res
+            total_short   += n_short
+            total_rej     += n_rej
 
-            if isinstance(finals, list):
-                for c in finals:
-                    fs = c.get("finalScore", 0) if isinstance(c, dict) else 0
-                    score_sums[model] = score_sums.get(model, 0) + fs
+            # Avg final score per model — pull from final_score_stats if available
+            # (avoids iterating all final_scores rows on every request)
+            fmean = run.get("final_score_stats", {}).get("mean")
+            if fmean is not None:
+                score_sums[model]   = score_sums.get(model, 0) + fmean
+                score_counts[model] = score_counts.get(model, 0) + 1
+            else:
+                # Legacy records that stored full final_scores — compute on the fly
+                finals = run.get("final_scores", [])
+                if isinstance(finals, list) and finals:
+                    fmean = sum(c.get("finalScore", 0) for c in finals if isinstance(c, dict)) / len(finals)
+                    score_sums[model]   = score_sums.get(model, 0) + fmean
                     score_counts[model] = score_counts.get(model, 0) + 1
 
-        avg_by_model = {
-            m: round(score_sums.get(m, 0) / score_counts[m] * 100)
+            # Aggregate rejection code tallies
+            for code, cnt in (run.get("rejection_codes") or {}).items():
+                rej_code_totals[code] = rej_code_totals.get(code, 0) + cnt
+
+        avg_final_by_model = {
+            m: round(score_sums[m] / score_counts[m] * 100, 1)
             for m in score_counts if score_counts[m] > 0
         }
+
+        overall_pass_rate = round(total_short / total_resumes * 100, 1) if total_resumes else 0
+
+        # Return the 5 most-recent runs for the "Recent Sessions" panel
+        recent_runs = [
+            {
+                "timestamp":   r.get("timestamp", "")[:19],
+                "model":       r.get("model_key", "?"),
+                "screened":    r.get("resume_count", 0),
+                "shortlisted": r.get("shortlisted", 0),
+                "pass_rate":   r.get("pass_rate",   0),
+            }
+            for r in reversed(runs[-5:])   # Newest first
+        ]
 
         return jsonify({
             "total_runs":             total_runs,
             "total_resumes_screened": total_resumes,
-            "models_used":           models_used,
-            "avg_score_by_model":    avg_by_model,
+            "total_shortlisted":      total_short,
+            "total_rejected":         total_rej,
+            "overall_pass_rate":      overall_pass_rate,
+            "models_used":            models_used,
+            "avg_final_by_model":     avg_final_by_model,
+            "rejection_code_totals":  rej_code_totals,
+            "recent_runs":            recent_runs,
         }), 200
 
     except Exception as exc:

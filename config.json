@@ -1,19 +1,6 @@
 {
-  "job_description": "You will be responsible for performing database queries, CRUD operations, and writing stored procedures. You will prepare and execute tests, analyze and resolve service tickets, and demonstrate proficiency in IT Service Management and Data Analytics tools, with a strong drive for innovation. Describe relationships between tables and write queries to retrieve data from database. Perform CRUD operations and write stored procedures for a given Low-Level Design. Prepare test cases / scripts / data and execute manual / automated tests. Analyze root cause and fix service tickets as per standard operating procedures. Demonstrate proficiency in tools related to IT Service Management and Data Analytics. Possess a strong drive to innovate & experiment in projects.",
-  "required_skills": [
-    "time management",
-    "written communication",
-    "verbal communication",
-    "teamwork",
-    "collaboration",
-    "problem solving",
-    "analytical skills",
-    "critical thinking",
-    "crud",
-    "stored procedures",
-    "itsm",
-    "data analytics"
-  ],
+  "job_description": "hii",
+  "required_skills": [],
   "scoring": {
     "skill_weight": 0.4,
     "semantic_weight": 0.6,

@@ -32,6 +32,7 @@ Runs fully offline. No network calls. OS-independent.
 """
 
 from __future__ import annotations
+import copy      # Used in score_candidates to isolate weight overrides from the caller's config
 import logging
 import math
 import re
@@ -87,7 +88,17 @@ class ScoringConfig:
     min_final_score:       float = 0.0
 
     def __post_init__(self):
-        """Validate and normalise weights after construction."""
+        """Validate and normalise weights after construction.
+
+        Normalisation ensures the three weights always sum to exactly 1.0.
+        This matters because the scoring formula is:
+            final = (skill_w * skill_score) + (sem_w * sem_score) + (exp_w * exp_score)
+        If weights summed to 1.5, a perfect candidate would score 1.5, not 1.0.
+
+        Why clamp negatives to zero first?
+        Negative weights would mean "penalise candidates who have skills",
+        which is never a valid configuration for a screening tool.
+        """
         # Clamp negative weights to zero
         self.skill_weight    = max(0.0, self.skill_weight)
         self.semantic_weight = max(0.0, self.semantic_weight)
@@ -285,12 +296,23 @@ def _has_negation_context(resume_text_lower: str, skill_term: str) -> bool:
 def _sigmoid_calibrate(raw: float, model_key: str) -> float:
     """Map a raw cosine similarity score onto [0, 1] using per-model sigmoid.
 
-    Different embedding models produce cosine scores in different numeric ranges.
-    This function normalises them to a common [0, 1] scale using a sigmoid curve
-    centered on each model's expected neutral-match score.
+    WHY sigmoid instead of simple min-max normalisation?
+    Min-max (linear scaling) requires knowing the actual min and max for a batch,
+    which isn't available until all resumes are scored. Sigmoid is a fixed,
+    stateless function that maps any value to (0, 1) without needing batch stats.
 
-    Without this calibration, Arctic scores (~0.15–0.40) would appear much lower
-    than MPNet scores (~0.30–0.65) even for equally good matches.
+    WHY different center values per model?
+    Each embedding model produces cosine scores in a different numeric range:
+      - MPNet  (all-mpnet-base-v2):  typical range ~0.30–0.65
+      - MxBai  (mxbai-embed-large):  typical range ~0.35–0.70
+      - Arctic (arctic-embed-m-v1.5): typical range ~0.15–0.40
+    The sigmoid's center is tuned so that a "neutral" match for each model
+    (where the JD and resume are unrelated) maps to ~0.50 on the output scale.
+    This prevents Arctic's naturally lower raw scores from always appearing
+    worse than MPNet's scores even for equivalent matches.
+
+    Formula: sigmoid(x) = 1 / (1 + e^(-scale * (x - center)))
+    With scale=8: the curve goes from ~0.02 to ~0.98 within \u00b10.30 of center.
 
     Args:
         raw:       Raw cosine similarity score from the embedding model.
@@ -311,19 +333,30 @@ def _sigmoid_calibrate(raw: float, model_key: str) -> float:
 def get_dynamic_threshold(final_scores: list, model_key: str = "mpnet") -> float:
     """Compute the 60th-percentile eligibility threshold from eligible candidates' scores.
 
-    The threshold adapts to each batch:
-        - Strong candidate pool → threshold rises (more selective)
-        - Weak candidate pool → threshold falls (more permissive)
-        - Very small batch (< 5 candidates) → falls back to model default
+    WHY 60th percentile?
+    A fixed threshold (e.g. 0.50) is biased by the model and the JD quality.
+    With MPNet, even an excellent match may score only 0.55; with MxBai the same
+    match might score 0.68. A dynamic threshold adapts to each batch, meaning:
+        - Strong candidate pool  → threshold rises  (more selective — only the best pass)
+        - Weak candidate pool    → threshold falls   (more permissive — someone must pass)
+    The 60th percentile means roughly the top 40% of candidates are shortlisted,
+    which is a reasonable default for screening (not too strict, not too loose).
 
-    The result is clamped within ±10% of the model default to prevent instability.
+    WHY only from eligible candidates?
+    Rejected candidates (no_contact, skill_below_min) score near 0.0. If we included
+    them, the 60th percentile would be dragged down, making the threshold too easy.
+
+    WHY clamp to model default ±10%?
+    Prevents instability with extreme batches:
+    - If all 5 resumes are excellent → p60 = 0.95 → threshold would wrongly reject most
+    - If all 5 are terrible → p60 = 0.10 → threshold would wrongly pass everyone
 
     Args:
         final_scores: List of final scores from eligible candidates only.
         model_key:    Model identifier for looking up the default threshold.
 
     Returns:
-        Dynamic threshold value (float), clamped to model default ±10%.
+        Dynamic threshold value (float), clamped to model default \u00b110%.
     """
     model_default = MODEL_THRESHOLDS.get(model_key, 0.50)
 
@@ -558,8 +591,25 @@ def is_eligible(info: dict, config: ScoringConfig,
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def score_candidates(candidates: list, required_skills: list,
-                     config: ScoringConfig, model_key: str = "mpnet") -> list:
+                     config: ScoringConfig, model_key: str = "mpnet",
+                     jd_quality_factor: float = 1.0) -> list:
     """Score all candidates in three passes and return ranked results.
+
+    WHY three passes (not one)?
+    Pass 1 needs all candidates' scores to compute the dynamic threshold in Pass 2.
+    Pass 2 needs only eligible candidates' scores (rejected ones would deflate the
+    threshold and make it too easy to pass). Pass 3 applies the threshold.
+    This two-phase design separates the scoring logic from the ranking logic cleanly.
+
+    Args:
+        candidates:        List of candidate dicts with info, semantic_score, etc.
+        required_skills:   List of required skill strings from the JD.
+        config:            ScoringConfig with weights and constraints.
+        model_key:         Embedding model identifier (for calibration/thresholds).
+        jd_quality_factor: 0.0–1.0 multiplier applied to every calibrated semantic
+                           score before composite scoring. 1.0 = no change (default).
+                           Set < 1.0 for vague/low-quality job descriptions to prevent
+                           artificially high semantic matches.
 
     Pass 1 — Component Scores:
         Compute skill_score, semantic_score, exp_score for each candidate.
@@ -575,15 +625,33 @@ def score_candidates(candidates: list, required_skills: list,
         Assign band labels: Strong Fit, Borderline, or Weak Fit.
         Flag false-negative recovery candidates (high semantic, low final).
 
-    Args:
-        candidates:      List of candidate dicts with info, semantic_score, etc.
-        required_skills: List of required skill strings from the JD.
-        config:          ScoringConfig with weights and constraints.
-        model_key:       Embedding model identifier (for calibration/thresholds).
-
     Returns:
         List of scored candidate dicts, sorted by (eligible, final_score) descending.
     """
+    # ── No-skills override: prevent 1.0 skill score from inflating final scores ─
+    # When no required skills are configured, _skill_score() returns 1.0 for everyone
+    # (no skills = all skills "matched"). If we kept the default 55% skill weight,
+    # the 1.0 × 0.55 = 0.55 boost would make the final score unrealistically high.
+    # Solution: when skills list is empty, set skill weight = 0 so the scoring relies
+    # entirely on semantic similarity (how relevant is the resume to the JD text?).
+    no_skills = not required_skills
+    if no_skills:
+        # Use a shallow copy so we don't mutate the caller's ScoringConfig object.
+        # Shallow copy is sufficient here because ScoringConfig only contains primitives.
+        config = copy.copy(config)
+        config.skill_weight    = 0.0
+        config.semantic_weight = 1.0
+        config.exp_weight      = 0.0
+        logger.info("[scoring_engine] No required skills — weights overridden to skill=0.00 semantic=1.00 exp=0.00")
+
+    # Clamp jd_quality_factor to [0.0, 1.0]
+    jd_quality_factor = max(0.0, min(1.0, jd_quality_factor))
+    if jd_quality_factor < 1.0:
+        logger.info(
+            "[scoring_engine] JD quality factor: %.2f — semantic scores will be dampened",
+            jd_quality_factor,
+        )
+
     logger.info(
         "[scoring_engine] Scoring %d candidates | weights: skill=%.2f semantic=%.2f exp=%.2f",
         len(candidates), config.skill_weight, config.semantic_weight, config.exp_weight,
@@ -601,7 +669,9 @@ def score_candidates(candidates: list, required_skills: list,
             calibrated_sems[fname] = 0.0               # Force zero for OOM fallback
             logger.warning("[scoring_engine] OOM fallback for %s — semantic_score forced to 0.0", fname)
         else:
-            calibrated_sems[fname] = _sigmoid_calibrate(raw_sem, model_key)
+            cal = _sigmoid_calibrate(raw_sem, model_key)
+            # Apply JD quality dampening AFTER calibration
+            calibrated_sems[fname] = round(cal * jd_quality_factor, 6)
             raw_values.append(raw_sem)
 
     if raw_values:
@@ -740,23 +810,37 @@ def score_candidates(candidates: list, required_skills: list,
         else:
             r["band"] = "Borderline"
 
-        # False-negative recovery: flag ineligible candidates with high semantic scores
-        # These candidates may be worth manual review despite failing the score threshold
+        # False-negative (FN) recovery: flag ineligible candidates with high semantic scores.
+        # "False-negative" here means a candidate who was REJECTED (below the score threshold)
+        # but actually has strong semantic alignment with the JD. This can happen when a
+        # candidate lists skills differently from the JD (e.g. "ML engineer" vs "machine learning").
+        # These candidates are NOT automatically shortlisted — they are flagged for MANUAL REVIEW
+        # so a human can decide if they deserve a second look.
+        #
+        # Note: Hard-rejected candidates (no_contact, experience_below_min) are NOT recovered
+        # even if their semantic score is high. Hard rules override FN recovery because we cannot
+        # contact a candidate with no contact info regardless of their resume quality.
         sem_floor = FN_RECOVERY_SEMANTIC_FLOOR.get(model_key.lower(), 0.55)
         if (not eligible
-                and r["final_score"] < dyn_threshold
-                and r["semantic_score"] > sem_floor):
+                and r["final_score"] < dyn_threshold   # Rejected by score threshold (not hard rule)
+                and r["semantic_score"] > sem_floor):  # But still semantically relevant to the JD
             r["fn_recovered"] = True
             logger.debug("[scoring_engine] FN Recovery: %s — final %.2f < thresh %.2f but sem %.2f > floor %.2f",
                          r["filename"], r["final_score"], dyn_threshold, r["semantic_score"], sem_floor)
         else:
             r["fn_recovered"] = False
 
-        logger.debug(
-            "[scoring_engine] %s | skill=%.2f sem=%.2f exp=%.2f → final=%.2f | thresh=%.2f | %s%s",
-            r["filename"], r["skill_score"], r["semantic_score"], r["exp_score"],
-            r["final_score"], dyn_threshold, "eligible" if eligible else rejection_reason,
-            " [FN_RECOVERED]" if r.get("fn_recovered") else "",
+        # ── Bug 4 fix: per-candidate structured INFO log ──────────────────
+        decision_str = "SHORTLISTED" if eligible else "REJECTED"
+        band_str     = f"[{r['band']}]" if eligible else f"[{rejection_code}: {round(r['final_score']*100)}% < {round(dyn_threshold*100)}%]"
+        fn_tag       = " ⚑FN" if r.get("fn_recovered") else ""
+        logger.info(
+            "[Candidate] %-28s | Skill: %3d%% | Semantic: %3d%% | Final: %3d%% → %s %s%s",
+            (r.get("name") or r["filename"])[:28],
+            round(r["skill_score"]    * 100),
+            round(r["semantic_score"] * 100),
+            round(r["final_score"]    * 100),
+            decision_str, band_str, fn_tag,
         )
         results.append(r)
 

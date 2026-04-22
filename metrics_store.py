@@ -1,8 +1,9 @@
 """
 metrics_store.py — Records and inspects ML pipeline metrics for every screening run.
 
-Provides both a programmatic API (used by app.py after each screening run) and
-a CLI interface for post-session analysis.
+Storage format: NDJSON (Newline-Delimited JSON) — one JSON object per line.
+This is the correct format for append-only log files: each record is self-contained,
+the file is trivially streamable, and rotation is a simple line-count check.
 
 API Functions:
     record_run(...)     — Append one screening run's metrics to metrics_log.jsonl
@@ -14,12 +15,13 @@ CLI Usage:
     python metrics_store.py                    — List all runs (one-line summaries)
     python metrics_store.py --run latest       — Full detail for the latest run
     python metrics_store.py --run <id>         — Full detail for a specific run
+    python metrics_store.py --stats            — Aggregate summary across all runs
     python metrics_store.py --compare          — Cross-run model comparison table
     python metrics_store.py --export csv       — Export all runs to metrics_export.csv
     python metrics_store.py --clear            — Delete all metrics files
 
 Storage:
-    metrics_log.jsonl    — One JSON record per screening run (auto-rotated at 500 entries)
+    metrics_log.jsonl    — One JSON record per line (NDJSON), auto-rotated at 500 entries
     embeddings_store.json — Optional raw embedding vectors (for advanced analysis)
 
 Runs fully offline. No network calls. OS-independent (uses pathlib).
@@ -53,27 +55,28 @@ _metrics_write_lock = threading.Lock()
 
 
 def _rotate_metrics_log(max_entries: int = MAX_METRICS_ENTRIES) -> None:
-    """Trim the metrics log to keep only the most recent max_entries records.
+    """Trim the NDJSON log to keep only the most recent max_entries lines.
+
+    NDJSON format: one complete JSON object per line, no blank lines.
+    This makes rotation trivial — just count lines and discard the oldest.
 
     Uses an atomic temp-file swap to prevent partial reads during rotation.
-    Only triggers when the file exceeds 100KB (avoids unnecessary I/O on small files).
+    Only triggers when the file exceeds 100 KB to avoid unnecessary I/O.
     """
     try:
         if not METRICS_LOG_FILE.exists():
             return
-
-        # Skip rotation for small files (< 100KB) — saves I/O
         if METRICS_LOG_FILE.stat().st_size < 100_000:
-            return
+            return                                     # Small file — skip rotation
 
-        raw = METRICS_LOG_FILE.read_text(encoding="utf-8")
-        records = [r.strip() for r in raw.split("\n\n") if r.strip()]
+        lines = METRICS_LOG_FILE.read_text(encoding="utf-8").splitlines()
+        # Filter out empty lines (defensive — should not exist in NDJSON)
+        records = [ln for ln in lines if ln.strip()]
         if len(records) <= max_entries:
             return                                     # Within limit — no action
 
-        keep = records[-max_entries:]
+        keep = records[-max_entries:]                  # Keep newest entries
 
-        # Atomic file replacement via temp file to prevent partial reads
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=METRICS_LOG_FILE.parent,
             suffix=".tmp",
@@ -81,14 +84,13 @@ def _rotate_metrics_log(max_entries: int = MAX_METRICS_ENTRIES) -> None:
         )
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-                fh.write("\n\n".join(keep) + "\n\n")
+                fh.write("\n".join(keep) + "\n")       # NDJSON: one record per line
             os.replace(tmp_path, METRICS_LOG_FILE)     # Atomic rename
             logger.info(
                 "[MetricsStore] Rotated %s: %d → %d entries.",
-                METRICS_LOG_FILE.name, len(records), max_entries,
+                METRICS_LOG_FILE.name, len(records), len(keep),
             )
         except Exception:
-            # Clean up temp file on failure
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -131,10 +133,15 @@ def record_run(
     final_scores: list,
     per_model_similarities: dict | None = None,
 ) -> None:
-    """Append one screening run's metrics to metrics_log.jsonl (thread-safe).
+    """Append one screening run's metrics to metrics_log.jsonl (thread-safe, NDJSON).
 
-    Records per-resume cosine similarities, aggregate statistics for all score
-    types, and a compact ranking snapshot for CLI viewers.
+    Each call writes exactly ONE line to the file (compact JSON, no indent).
+    This is the NDJSON format: each line is a complete, self-contained JSON object.
+
+    Why no indent?
+    Indented JSON spans many lines, making it impossible to split records
+    reliably by newline. Compact single-line JSON keeps the file format clean
+    and rotation trivially correct.
 
     Args:
         run_id:                  Unique identifier for this run (typically ISO timestamp).
@@ -144,38 +151,55 @@ def record_run(
         final_scores:            List of serialised candidate dicts from score_candidates.
         per_model_similarities:  Optional cross-model comparison data.
     """
-    # Extract score lists for statistical computation
     sims   = [r.get("similarity_score", 0.0) for r in similarity_results]
     finals = [r.get("finalScore",        0.0) for r in final_scores]
     skills = [r.get("skillScore",        0.0) for r in final_scores]
     sems   = [r.get("semanticScore",     0.0) for r in final_scores]
 
+    # Compute shortlist / rejection breakdown for the stats API
+    shortlisted = sum(1 for r in final_scores if r.get("eligible"))
+    rejected    = len(final_scores) - shortlisted
+    pass_rate   = round(shortlisted / len(final_scores) * 100, 1) if final_scores else 0.0
+
+    # Tally rejection codes so the panel can see WHY candidates failed
+    rejection_codes: dict[str, int] = {}
+    for r in final_scores:
+        code = r.get("rejection_code", "")
+        if code:
+            rejection_codes[code] = rejection_codes.get(code, 0) + 1
+
     entry = {
         "run_id":       run_id,
         "timestamp":    datetime.now(timezone.utc).isoformat(),
         "model_key":    model_key,
-        "job_description": job_description[:200],      # Truncate for storage efficiency
+        "job_description": job_description[:200],
 
-        "resume_count": len(sims),
+        "resume_count":  len(sims),
+        "shortlisted":   shortlisted,
+        "rejected":      rejected,
+        "pass_rate":     pass_rate,
 
-        # Per-resume cosine similarity scores (used by CLI --run viewer)
+        # Batch-level quality metadata (if available from the pipeline)
+        "skill_weight":  final_scores[0].get("skill_weight") if final_scores else None,
+        "jd_quality":    final_scores[0].get("jd_quality")   if final_scores else None,
+
+        # Rejection breakdown by code (machine-readable for the stats API)
+        "rejection_codes": rejection_codes,
+
+        # Per-resume cosine similarities (used by CLI --run viewer)
         "cosine_similarities": [
-            {
-                "filename":   r.get("filename", ""),
-                "similarity": round(r.get("similarity_score", 0.0), 4),
-            }
+            {"filename": r.get("filename", ""), "similarity": round(r.get("similarity_score", 0.0), 4)}
             for r in similarity_results
         ],
 
         # Aggregate statistics for each score type
         "stats":                _compute_stats(sims),
         "per_model":            per_model_similarities or {},
-        "spearman":             {},                     # Reserved for future cross-model correlation
         "final_score_stats":    _compute_stats(finals),
         "skill_score_stats":    _compute_stats(skills),
         "semantic_score_stats": _compute_stats(sems),
 
-        # Compact ranking snapshot for quick CLI viewing
+        # Compact ranking snapshot for CLI viewing
         "rankings": [
             {
                 "rank":          r.get("rank"),
@@ -185,23 +209,26 @@ def record_run(
                 "semanticScore": round(r.get("semanticScore", 0.0), 4),
                 "finalScore":    round(r.get("finalScore",    0.0), 4),
                 "eligible":      r.get("eligible", False),
+                "band":          r.get("band", ""),
+                "rejection_code": r.get("rejection_code", ""),
             }
             for r in final_scores
         ],
 
-        # Full candidate data for API stats endpoint
+        # Full candidate data for the /api/stats endpoint
         "final_scores": final_scores,
     }
 
     try:
-        block = json.dumps(entry, indent=2, ensure_ascii=False) + "\n\n"
+        # NDJSON: compact single-line JSON, terminated by \n
+        line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
         with _metrics_write_lock:
             with open(METRICS_LOG_FILE, "a", encoding="utf-8") as fh:
-                fh.write(block)
+                fh.write(line)
             _rotate_metrics_log()                       # Trim if file exceeds max entries
         logger.info(
-            "[MetricsStore] Run recorded: %s (%d resumes, model=%s).",
-            run_id[:19], len(sims), model_key,
+            "[MetricsStore] Run recorded: %s (%d resumes, model=%s, pass_rate=%.0f%%).",
+            run_id[:19], len(sims), model_key, pass_rate,
         )
     except OSError as exc:
         logger.warning("[MetricsStore] Could not write metrics log: %s", exc)
@@ -210,8 +237,8 @@ def record_run(
 def load_all_runs() -> list[dict]:
     """Load every stored run from metrics_log.jsonl (oldest first).
 
-    Corrupted/malformed JSON blocks are silently skipped to ensure the
-    function always returns a valid list.
+    NDJSON format: each line is one complete JSON object.
+    Blank lines and malformed JSON lines are silently skipped.
 
     Returns:
         List of run dictionaries, ordered oldest to newest.
@@ -219,16 +246,15 @@ def load_all_runs() -> list[dict]:
     if not METRICS_LOG_FILE.exists():
         return []
 
-    raw = METRICS_LOG_FILE.read_text(encoding="utf-8")
     entries = []
-    for block in raw.split("\n\n"):
-        block = block.strip()
-        if not block:
-            continue
+    for line in METRICS_LOG_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue                                    # Skip blank lines
         try:
-            entries.append(json.loads(block))
+            entries.append(json.loads(line))
         except json.JSONDecodeError:
-            pass                                        # Skip malformed blocks
+            pass                                        # Skip malformed lines
 
     return entries
 
@@ -449,6 +475,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show detail for a run_id, or 'latest' for the most recent run.",
     )
     p.add_argument(
+        "--stats", action="store_true",
+        help="Show aggregate summary across all runs (total resumes, pass rates, model breakdown).",
+    )
+    p.add_argument(
         "--compare", action="store_true",
         help="Show cross-run model comparison table.",
     )
@@ -487,6 +517,41 @@ def main(argv: list[str] | None = None) -> None:
     # --export csv: Dump all runs to CSV
     if args.export == "csv":
         export_to_csv()
+        return
+
+    # --stats: Aggregate summary
+    if args.stats:
+        runs = load_all_runs()
+        if not runs:
+            print("No metrics data found.")
+            return
+        total_resumes = sum(r.get("resume_count", 0) for r in runs)
+        total_short   = sum(r.get("shortlisted", 0) for r in runs)
+        total_rej     = sum(r.get("rejected",    0) for r in runs)
+        pass_rate     = round(total_short / total_resumes * 100, 1) if total_resumes else 0
+        models: dict[str, int] = {}
+        for r in runs:
+            m = r.get("model_key", "unknown")
+            models[m] = models.get(m, 0) + 1
+        rej_codes: dict[str, int] = {}
+        for r in runs:
+            for code, cnt in (r.get("rejection_codes") or {}).items():
+                rej_codes[code] = rej_codes.get(code, 0) + cnt
+        latest = runs[-1].get("timestamp", "")[:19]
+        print(f"\n  === Aggregate Metrics Summary ({len(runs)} runs) ===\n")
+        print(f"  Total resumes screened : {total_resumes}")
+        print(f"  Total shortlisted      : {total_short}")
+        print(f"  Total rejected         : {total_rej}")
+        print(f"  Overall pass rate      : {pass_rate}%")
+        print(f"  Latest run             : {latest}")
+        print(f"\n  Models used:")
+        for m, cnt in sorted(models.items()):
+            print(f"    {m:<10} {cnt} run(s)")
+        if rej_codes:
+            print(f"\n  Rejection reasons (all runs):")
+            for code, cnt in sorted(rej_codes.items(), key=lambda x: -x[1]):
+                print(f"    {code:<30} {cnt}")
+        print()
         return
 
     # --compare: Cross-run model comparison table
